@@ -59,19 +59,11 @@ def _containment_for(ips_state: Dict[str, Any], ip: str, mac: str, dev_id: str) 
     inspects, WITHOUT instantiating IPSMitigator (that constructor spins up background
     threads -- wrong for something computed on every device list/detail request). Mirrors
     that method's own ip/mac/dev_id fallback matching."""
-    tarpit = ips_state.get("tarpit_targets", {})
-    router_isolated = ips_state.get("router_isolated_devices", {})
-    blocked_domains = ips_state.get("blocked_domains", {})
-
-    tarpitted = ip in tarpit or any(m.get("dev_id") == dev_id for m in tarpit.values())
-    router_flag = (mac and mac != "unknown" and mac in router_isolated) or any(
-        m.get("dev_id") == dev_id for m in router_isolated.values()
-    )
-    blocked_domain_count = sum(
-        1 for m in blocked_domains.values()
-        if m.get("device_id") == dev_id or (ip and ip != "unknown" and m.get("device_ip") == ip)
-    )
-    return {"tarpitted": bool(tarpitted), "router_isolated": bool(router_flag), "blocked_domain_count": blocked_domain_count}
+    # By device id or MAC, never by address (containment T1, mitigation/containment.py): an address changes hands.
+    from mitigation import containment as _ct
+    c = _ct.containment_of(ips_state, dev_id, [mac])
+    return {"tarpitted": c["tarpitted"], "router_isolated": c["router_isolated"],
+            "blocked_domain_count": c["blocked_domain_count"], "tarpit_status": c["status"]}
 
 
 @router.get("/api/devices")

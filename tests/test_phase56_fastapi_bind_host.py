@@ -117,9 +117,9 @@ check("REGRESSION GUARD: ips.py's router-isolation-status reconcile call still h
 
 _alerts_src = (ROOT / "src" / "mitigation" / "alerts.py").read_text(encoding="utf-8")
 _alerts_loopback_count = _alerts_src.count('f"http://127.0.0.1:{fastapi_port}/api/ipc/')
-check("REGRESSION GUARD: all 5 of alerts.py's internal IPC calls (release x2/block/immunize/revoke) "
-      "still hardcode 127.0.0.1, untouched by this fix",
-      _alerts_loopback_count == 5, f"found {_alerts_loopback_count} occurrences, expected 5")
+check("REGRESSION GUARD: all 6 of alerts.py's internal IPC calls (release x2/block/blockdomain/immunize/revoke) "
+      "still hardcode 127.0.0.1, untouched by this fix (blockdomain added 2026-10-13)",
+      _alerts_loopback_count == 6, f"found {_alerts_loopback_count} occurrences, expected 6")
 
 # ═══════════════════════════════════════════════════════════════════════════════════
 # Section E: REGRESSION GUARD -- the loopback-bypass auth check is unchanged

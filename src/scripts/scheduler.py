@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import time
@@ -15,6 +16,7 @@ from core import resource_gate  # noqa: E402
 from core import job_coordinator  # noqa: E402
 from core import job_result_channel  # noqa: E402
 from core import scheduler_metrics  # noqa: E402
+from utils import write_job_health, rotate_jsonl_if_oversized  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [SCHEDULER] %(message)s")
 LOGGER = logging.getLogger("scheduler")
@@ -97,15 +99,76 @@ def check_cron(cron_str: str, current_time: datetime) -> bool:
 def load_config():
     """Returns the FLAT config namespace (already merged across every category), same
     as config.py's CONFIG.get(). Reads config.yaml directly (not through config.py's
-    LiveConfig) so this standalone daemon doesn't need to boot the full engine."""
+    LiveConfig) so this standalone daemon doesn't need to boot the full engine -- plus the
+    live overrides (state/config_overrides.json, written by the console and autotuning), by
+    the same rule as LiveConfig: static keys are never overridden. Before 2026-10-12 the
+    scheduler read config.yaml only, so e.g. an `autotune_enabled` override reached the web UI
+    and the health manager but not the scheduler that runs the job."""
     config_path = Path(__file__).resolve().parent.parent.parent / "config.yaml"
     try:
         with open(config_path, "r", encoding="utf-8") as f:
             raw = yaml.safe_load(f) or {}
-        return _flatten_config_categories(raw)
+        config = _flatten_config_categories(raw)
     except Exception as e:
         LOGGER.error(f"Failed to load config: {e}")
         return {}
+    return _apply_live_overrides(config, config_path.parent / "state" / "config_overrides.json")
+
+
+def _apply_live_overrides(config: dict, overrides_path: Path) -> dict:
+    try:
+        raw = json.loads(overrides_path.read_text(encoding="utf-8")) if overrides_path.exists() else {}
+    except Exception as exc:
+        LOGGER.warning(f"Could not read live overrides {overrides_path}: {exc}")
+        return config
+    try:
+        from config import _STATIC_KEYS, enforce_ips_master_switch
+    except Exception as exc:                        # never apply overrides without knowing which keys are static
+        LOGGER.warning(f"Live overrides not applied (config module unavailable: {exc})")
+        return config
+    for key, entry in (raw or {}).items():
+        if isinstance(entry, dict) and "value" in entry and key not in _STATIC_KEYS:
+            config[key] = entry["value"]
+    enforce_ips_master_switch(config)
+    return config
+
+
+def _oom_kills() -> "int | None":
+    """This cgroup's out-of-memory kill counter (cgroup v2 memory.events, else v1 memory.oom_control); None when
+    unreadable (not Linux, no cgroup). A job's kill is attributed to memory only when the counter rose during it."""
+    for path, key in (("/sys/fs/cgroup/memory.events", "oom_kill"),
+                      ("/sys/fs/cgroup/memory/memory.oom_control", "oom_kill")):
+        try:
+            for line in Path(path).read_text(encoding="utf-8").splitlines():
+                parts = line.split()
+                if len(parts) == 2 and parts[0] == key:
+                    return int(parts[1])
+        except (OSError, ValueError):
+            continue
+    return None
+
+
+def failure_reason(returncode, killed: bool, oom_before, oom_after, budget_minutes=None) -> str:
+    """Why a job ended without reporting a result itself."""
+    if killed:
+        return f"stopped: ran past its time budget ({budget_minutes} min)" if budget_minutes else "stopped by the scheduler"
+    if oom_before is not None and oom_after is not None and oom_after > oom_before:
+        return "killed: out of memory"
+    if returncode is not None and returncode < 0:
+        return f"killed by signal {-returncode}"
+    return f"exited with code {returncode} without reporting a result"
+
+
+def record_run(state_dir: Path, entry: dict) -> None:
+    """Run history (2026-10-12): one line per finished run in state/scheduler_runs.jsonl -- the container's own log is
+    lost on every recreate (Section C), and job_health.json keeps only the last run."""
+    path = Path(state_dir) / "scheduler_runs.jsonl"
+    try:
+        rotate_jsonl_if_oversized(path, max_bytes=5 * 1024 * 1024)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, sort_keys=True) + "\n")
+    except OSError as exc:
+        LOGGER.warning(f"Could not record the run of {entry.get('job')}: {exc}")
 
 
 def main():
@@ -136,6 +199,17 @@ def main():
     # recorded budget by a previous scheduler.py life (a restart/crash of THIS
     # process does not kill its children -- see job_coordinator.reconcile_on_boot()'s
     # own docstring for why that matters).
+    # A job that died together with the previous scheduler life (or its container: e.g. out of memory) left no exit
+    # for anyone to see; record it before the slot self-heals, so it is a failure with a reason, not silence.
+    _dead = job_coordinator.dead_occupant(state_dir)
+    if _dead:
+        _reason = ("ended without finishing: the scheduler or its container stopped while it ran "
+                   "(out of memory or a restart)")
+        LOGGER.error(f"'{_dead.get('job')}' (pid {_dead.get('pid')}) {_reason}.")
+        write_job_health(state_dir, _dead.get("job") or "unknown",
+                         time.time() - float(_dead.get("started_at") or time.time()), extra={"error": _reason})
+        record_run(state_dir, {"job": _dead.get("job"), "pid": _dead.get("pid"), "started": _dead.get("started_at"),
+                               "ended": None, "outcome": "failed", "reason": _reason})
     scheduler_metrics.record_kill(job_coordinator.reconcile_on_boot(state_dir))
 
     # Track when a job was last run to prevent multiple executions within the same minute
@@ -164,8 +238,24 @@ def main():
             if proc.poll() is not None:
                 job_coordinator.release(state_dir, job_name, proc.pid)
                 result = job_result_channel.collect(info["result_fd"]) if info.get("result_fd") is not None else None
-                scheduler_metrics.record_exit(job_name, proc.returncode, result, time.time(),
+                ended = time.time()
+                scheduler_metrics.record_exit(job_name, proc.returncode, result, ended,
                                               killed=info.get("killed", False))
+                reason = None
+                if info.get("killed") or (proc.returncode != 0 and result is None):
+                    # The job could not report its own failure (killed, crashed before reporting): the scheduler
+                    # records it, with the reason, so the web UI and health manager show it (2026-10-12: OOM kills
+                    # of the backtest left "last success 10-07" and no reason).
+                    reason = failure_reason(proc.returncode, info.get("killed", False), info.get("oom_before"),
+                                            _oom_kills(), info.get("budget_minutes"))
+                    LOGGER.error(f"'{job_name}' (pid {proc.pid}) {reason}.")
+                    write_job_health(state_dir, job_name, ended - info.get("started", ended),
+                                     extra={"error": reason})
+                record_run(state_dir, {"job": job_name, "pid": proc.pid, "started": info.get("started"),
+                                       "ended": ended, "returncode": proc.returncode,
+                                       "outcome": "failed" if reason else ((result or {}).get("status") or
+                                                                           ("success" if proc.returncode == 0 else "failed")),
+                                       "reason": reason or (((result or {}).get("extra") or {}).get("error"))})
                 del running[job_name]
         for job_name, info in list(running.items()):
             if info.get("paused") and job_coordinator.should_resume(state_dir, job_name, info["proc"].pid):
@@ -267,7 +357,8 @@ def main():
             LOGGER.info(f"Preempted pid {old_pid} to run higher-priority '{job_name}' (pid {proc.pid}).")
 
         running[job_name] = {"proc": proc, "priority": priority, "pausable": pausable, "paused": False,
-                             "result_fd": read_fd, "killed": False}
+                             "result_fd": read_fd, "killed": False, "started": time.time(),
+                             "oom_before": _oom_kills(), "budget_minutes": max_runtime_minutes}
         scheduler_metrics.set_state(job_name, scheduler_metrics.TASK_STATE_RUNNING)
         job_coordinator.clear_deferral(state_dir, job_name)
         return True

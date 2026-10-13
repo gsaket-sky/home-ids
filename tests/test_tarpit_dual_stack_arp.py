@@ -48,7 +48,7 @@ def no_neighbours(monkeypatch):
 def mitigator(tmp_path):
     sm = StateManager(state_path=str(tmp_path / "ids_state.json"))
     config = {"ips_router_enabled": False, "ips_tarpit_enabled": True, "onboarding_mode_days": 0,
-              "state_path": str(tmp_path / "ids_state.json"), "fritz_ip": "10.0.0.1"}
+              "state_path": str(tmp_path / "ids_state.json")}
     m = IPSMitigator(config=config, state_manager=sm, start_workers=False)
     m.tarpit_armed = True
     return m
@@ -101,16 +101,20 @@ def test_ipv6_target_without_any_ipv4_is_returned_unchanged(no_neighbours):
 
 # --- registration keeps the key, adds the hint ----------------------------------------------------------------------
 
-def test_operator_tarpit_keeps_the_ipv6_key_and_stores_the_ipv4_hint(mitigator, no_neighbours):
+# Containment T1 (2026-10-12): entries are keyed by DEVICE ("dev:<id>") and carry the device's MACs; the IPv4 the
+# ARP half uses for a MAC is stored per MAC ("arp_ips") -- the neighbour table first, this hint when it has none.
+
+def test_operator_tarpit_keys_by_device_and_stores_the_ipv4_hint(mitigator, no_neighbours):
     ok, _ = mitigator.operator_tarpit("dev1", V6, MAC, "host1", ipv4_candidates=[V6, "10.0.0.21"])
     assert ok
-    assert mitigator._tarpit_active_targets[V6]["arp_ip"] == "10.0.0.21"
-    assert "10.0.0.21" not in mitigator._tarpit_active_targets
+    assert set(mitigator._tarpit_active_targets) == {"dev:dev1"}                     # no address key at all
+    entry = mitigator._tarpit_active_targets["dev:dev1"]
+    assert entry["arp_ips"] == {MAC: "10.0.0.21"} and entry["macs"] == [MAC] and entry["registered_ip"] == V6
 
 
-def test_operator_tarpit_ipv4_target_gets_no_hint(mitigator, no_neighbours):
+def test_operator_tarpit_ipv4_target_is_its_own_hint(mitigator, no_neighbours):
     mitigator.operator_tarpit("dev1", "10.0.0.5", MAC, "host1", ipv4_candidates=["10.0.0.5"])
-    assert "arp_ip" not in mitigator._tarpit_active_targets["10.0.0.5"]
+    assert mitigator._tarpit_active_targets["dev:dev1"]["arp_ips"] == {MAC: "10.0.0.5"}
 
 
 def test_mitigate_autonomous_tarpit_stores_the_hint_from_known_ips(mitigator, no_neighbours):
@@ -119,22 +123,24 @@ def test_mitigate_autonomous_tarpit_stores_the_hint_from_known_ips(mitigator, no
                          known_ips=BoundedSet(max_size=8, initial=[V6, "10.0.0.21"]))
     mitigator.mitigate(st, target_domain="unknown", risk_score=9.5, lateral_threat=False, is_safe=False,
                        decision_state="HIGH")
-    assert mitigator._tarpit_active_targets[V6]["arp_ip"] == "10.0.0.21"
+    assert mitigator._tarpit_active_targets["dev:dev1"]["arp_ips"] == {MAC: "10.0.0.21"}
 
 
-# --- the lookups by client_ip still find the target (why the key was NOT changed to the IPv4) ------------------------
+# --- lookups by device id or MAC; an address alone names no device ----------------------------------------------------
 
-def test_lookups_by_the_ipv6_client_ip_still_find_the_target(mitigator, no_neighbours):
+def test_lookups_by_device_or_mac_find_the_target_an_address_alone_does_not(mitigator, no_neighbours):
     mitigator.operator_tarpit("dev1", V6, MAC, "host1", ipv4_candidates=["10.0.0.21"])
-    assert "TARPITTED" in mitigator.get_containment_status(client_ip=V6)            # no dev_id fallback needed
-    assert mitigator.release_device(V6) is True
-    assert V6 not in mitigator._tarpit_active_targets
+    assert "TARPITTED" in mitigator.get_containment_status(client_ip=V6, dev_id="dev1")
+    assert "TARPITTED" in mitigator.get_containment_status(client_ip="10.0.0.99", mac_addr=MAC.upper())
+    assert "TARPITTED" not in mitigator.get_containment_status(client_ip=V6)       # the next holder of V6 is not it
+    assert mitigator.release_device("dev1") is True
+    assert mitigator._tarpit_active_targets == {}
 
 
-def test_safe_device_auto_release_still_finds_the_ipv6_target(mitigator, no_neighbours):
+def test_safe_device_auto_release_finds_the_device(mitigator, no_neighbours):
     mitigator.operator_tarpit("dev1", V6, MAC, "host1", ipv4_candidates=["10.0.0.21"])
     st = SimpleNamespace(client_ip=V6, hostname="host1", device_id="dev1", mac_address=MAC)
-    assert V6 in mitigator._tarpit_active_targets
+    assert "dev:dev1" in mitigator._tarpit_active_targets
     mitigator.mitigate(st, target_domain="unknown", risk_score=0.0, lateral_threat=False, is_safe=True)
     assert mitigator._tarpit_active_targets == {}                    # released, not left behind under another key
 
@@ -154,6 +160,9 @@ class _StopLoop(Exception):
 
 
 def test_arp_loop_sends_ipv4_frames_for_ipv6_targets_and_survives_a_bad_target(mitigator, monkeypatch, caplog):
+    # T0 (2026-10-12): the gateway is discovered, never read from config fritz_ip.
+    monkeypatch.setattr(ips_module, "_discover_gateway_ipv4", lambda: "10.0.0.1")
+    monkeypatch.setattr(l2_raw, "neighbor_mac", lambda ip, timeout=2.0: None)
     neighbours = {MAC: "10.0.0.21"}
     monkeypatch.setattr(l2_raw, "ipv4_for_mac", lambda mac: neighbours.get(mac))
     monkeypatch.setattr(l2_raw, "open_raw", lambda proto=None: object())
@@ -187,7 +196,7 @@ def test_arp_loop_sends_ipv4_frames_for_ipv6_targets_and_survives_a_bad_target(m
     assert all(":" not in ip for ip in looked_up)                            # interfaces looked up by IPv4 only
     for frame in sent:                                                       # still "the gateway is at a bogus MAC"
         assert str(ipaddress.IPv4Address(frame[28:32])) == "10.0.0.1"
-    no_ipv4 = [r for r in caplog.records if "no IPv4 address known for fe80::4" in r.getMessage()]
+    no_ipv4 = [r for r in caplog.records if "no IPv4 address known for d4 (aa:bb:cc:dd:ee:04)" in r.getMessage()]
     assert len(no_ipv4) == 1                                                 # logged once, not every 2 s
 
 
@@ -213,13 +222,13 @@ def test_console_tarpit_for_an_ipv6_device_stores_the_ipv4_hint(tmp_path, monkey
     assert result["status"] == "success"
     check = StateManager(state_path=str(path))
     check.load_from_disk()
-    target = check.get_ips_state()["tarpit_targets"][V6]
-    assert target["dev_id"] == "dev_v6" and target["arp_ip"] == "192.168.1.60"
+    target = check.get_ips_state()["tarpit_targets"]["dev:dev_v6"]
+    assert target["dev_id"] == "dev_v6" and target["arp_ips"] == {MAC: "192.168.1.60"}
 
 
 # --- an address that changed hands (2026-10-12) -------------------------------------------------------------------------
-# Tarpit entries are keyed by address. When the contained device's address passes to another device, the contained
-# device must stay contained and the new holder must not inherit (or be refused) containment.
+# When the contained device's address passes to another device, the contained device must stay contained and the new
+# holder must not inherit (or be refused) containment. With device keys (T1) the address plays no part at all.
 
 OLD_MAC, NEW_MAC = "aa:bb:cc:dd:ee:21", "aa:bb:cc:dd:ee:22"
 
@@ -229,27 +238,32 @@ def test_a_handed_over_address_keeps_the_old_device_contained_and_tarpits_the_ne
     ok, msg = mitigator.operator_tarpit("new", "10.0.0.30", NEW_MAC, "new-host")
     assert ok and "Already" not in msg
     t = mitigator._tarpit_active_targets
-    assert t[f"mac:{OLD_MAC}"]["dev_id"] == "old" and t["10.0.0.30"]["dev_id"] == "new"
+    assert t["dev:old"]["macs"] == [OLD_MAC] and t["dev:new"]["macs"] == [NEW_MAC]
     assert "TARPITTED" in mitigator.get_containment_status(client_ip="10.0.0.99", dev_id="old")
-    assert mitigator.release_device("old") and f"mac:{OLD_MAC}" not in t and "10.0.0.30" in t
+    assert mitigator.release_device("old")
+    t = mitigator._tarpit_active_targets
+    assert "dev:old" not in t and "dev:new" in t
 
 
 def test_ensure_never_moves_containment_to_another_mac(mitigator, no_neighbours):
     mitigator.operator_tarpit("old", "10.0.0.31", OLD_MAC, "old-host")
     mitigator._ensure_tarpit_target(client_ip="10.0.0.31", mac_addr=NEW_MAC, hostname="new-host", dev_id="new")
     t = mitigator._tarpit_active_targets
-    assert t[f"mac:{OLD_MAC}"]["mac"] == OLD_MAC and t["10.0.0.31"]["mac"] == NEW_MAC
+    assert t["dev:old"]["macs"] == [OLD_MAC] and t["dev:new"]["macs"] == [NEW_MAC]
 
 
 def test_same_or_unknown_mac_behaves_as_before(mitigator, no_neighbours):
     mitigator.operator_tarpit("d", "10.0.0.32", OLD_MAC, "h")
     assert mitigator.operator_tarpit("d", "10.0.0.32", OLD_MAC, "h")[1] == "Already tarpitted."
-    mitigator._tarpit_active_targets["10.0.0.33"] = {"mac": "unknown", "hostname": "h", "dev_id": "e"}
+    mitigator._tarpit_active_targets["10.0.0.33"] = {"mac": "unknown", "hostname": "h", "dev_id": "e"}   # older entry
     mitigator._ensure_tarpit_target(client_ip="10.0.0.33", mac_addr=NEW_MAC, hostname="h", dev_id="e")
-    assert mitigator._tarpit_active_targets["10.0.0.33"]["mac"] == NEW_MAC        # the MAC becoming known: filled in
+    t = mitigator._tarpit_active_targets
+    assert t["dev:e"]["macs"] == [NEW_MAC] and "10.0.0.33" not in t      # the MAC becoming known: one entry, filled in
 
 
 def test_arp_loop_reaches_a_rekeyed_device_at_its_current_ipv4(mitigator, monkeypatch):
+    monkeypatch.setattr(ips_module, "_discover_gateway_ipv4", lambda: "10.0.0.1")
+    monkeypatch.setattr(l2_raw, "neighbor_mac", lambda ip, timeout=2.0: None)
     monkeypatch.setattr(l2_raw, "ipv4_for_mac", lambda mac: {OLD_MAC: "10.0.0.41"}.get(mac))
     monkeypatch.setattr(l2_raw, "open_raw", lambda proto=None: object())
     monkeypatch.setattr(l2_raw, "interface_for", lambda ip: "eth0")

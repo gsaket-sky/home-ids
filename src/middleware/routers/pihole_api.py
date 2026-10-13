@@ -1,5 +1,6 @@
 import json
 import threading
+import time
 from typing import Dict, Any, Optional
 from pydantic import BaseModel, Field
 from fastapi import APIRouter, HTTPException, Depends
@@ -190,6 +191,37 @@ def _apply_operator_correction(alert_payload: dict, device_id: str, target: str,
     }
 
 
+@router.post("/api/ipc/approve_domain_block")
+def ipc_approve_domain_block(payload: IPCTargetRequest, token: str = Depends(verify_token)):
+    """Interactive mode (2026-10-12): the operator approved a domain block the engine queued for one alert
+    (a "pending_domain_block" action-ledger entry, pipeline.py). The block records the alert that caused it, like an
+    autonomous one; the entry is used up, so a second tap does nothing."""
+    action_id = payload.target
+    LOGGER.info("Received IPC approve-domain-block request for action_id: %s", action_id)
+    state_path = CONFIG.get("state_path", "state/ids_state.json")
+    sm = StateManager(state_path=state_path)
+    sm.load_from_disk()
+    entry = sm.get_action(action_id)
+    if (not entry or entry.get("type") != "pending_domain_block" or entry.get("revoked")
+            or float(entry.get("expires_at", 0) or 0) < time.time()):
+        raise HTTPException(status_code=404, detail=f"Approval '{action_id}' not found, expired or already used.")
+    extra = entry.get("extra", {}) or {}
+    domain = extra.get("domain") or entry.get("target")
+    ips = IPSMitigator(config=CONFIG, state_manager=sm, start_workers=False)
+    blocked = ips._block_domain(
+        domain=domain, hostname=entry.get("hostname", "unknown"), device_ip=extra.get("device_ip", "unknown"),
+        dev_id=entry.get("device_id", "unknown"), reason=f"approved by the operator: {extra.get('reason', '')}",
+        alert_ref={"incident_id": extra.get("incident_id"), "signature": extra.get("signature"),
+                   "target_source": extra.get("target_source"), "approved": True})
+    sm.revoke_action(action_id)                      # used up either way: a failed block is retried by the engine
+    if blocked and entry.get("device_id"):
+        # approving the block is a person confirming the threat (2026-10-13)
+        _get_argus_cl_afpe_engine().record_operator_confirmation(entry["device_id"], extra.get("signature") or "")
+    sm.flush_to_disk()
+    Path(state_path).parent.joinpath(".ipc_sync_signal").touch()
+    return {"status": "success", "domain": domain, "blocked": bool(blocked)}
+
+
 @router.post("/api/ipc/incident/{incident_id}/not_a_threat")
 def ipc_incident_not_a_threat(incident_id: str, token: str = Depends(verify_token)):
     """The web UI's "Not a threat" on an incident: the same correction as the Telegram button, applied to the
@@ -206,7 +238,9 @@ def ipc_incident_not_a_threat(incident_id: str, token: str = Depends(verify_toke
         except (TypeError, ValueError):
             raise HTTPException(status_code=422, detail="The incident's alert record is unreadable.")
         ctx = alert_payload.get("network_context", {}) or {}
-        target = ctx.get("queried_domain") or ctx.get("destination_ip") or "unknown"
+        # target_for_key: the string "unknown" is no target (it is truthy, so `or` used to pick it over the address).
+        from incident_key import target_for_key
+        target = target_for_key(ctx.get("destination_ip"), ctx.get("queried_domain"))
         return _apply_operator_correction(alert_payload, row["device_id"] or "unknown", target,
                                           {"extra": {"alert_event_id": row["alert_event_id"]}},
                                           {"incident_id": incident_id})
@@ -254,6 +288,10 @@ def _ipc_revoke_logic(action_id: str):
             with sm.lock_device(device_id) as state:
                 state.has_validated_threat = True
                 state.confirmed_threat_count = getattr(state, "confirmed_threat_count", 0) + 1
+            # a person said "this was a real threat": the outcome autotune may learn from (2026-10-13)
+            extra = entry.get("extra") or {}
+            signature = extra.get("signature") or (extra.get("alert_payload") or {}).get("signature_base") or ""
+            _get_argus_cl_afpe_engine().record_operator_confirmation(device_id, signature)
 
         sm.flush_to_disk()
         Path(state_path).parent.joinpath(".ipc_sync_signal").touch()

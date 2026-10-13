@@ -66,8 +66,11 @@ with tempfile.TemporaryDirectory() as tmpdir:
     check("THE FIX: the SAME query, now passing dev_id, correctly finds the tarpit entry "
           "via the dev_id fallback despite the client_ip mismatch",
           "TARPITTED" in ips.get_containment_status(client_ip=NEW_IP, mac_addr=NEW_MAC, dev_id=DEV_ID))
-    check("REGRESSION GUARD: the direct client_ip match still works on its own (no dev_id needed)",
-          "TARPITTED" in ips.get_containment_status(client_ip=OLD_IP, mac_addr=NEW_MAC))
+    # Containment T1 (2026-10-12): an address alone is no identity -- its next holder is another device. A MAC is.
+    check("a contained device is found by its MAC without dev_id",
+          "TARPITTED" in ips.get_containment_status(client_ip=NEW_IP, mac_addr=OLD_MAC))
+    check("REGRESSION GUARD (T1): the old address alone no longer marks whoever holds it now as tarpitted",
+          "UNBLOCKED" in ips.get_containment_status(client_ip=OLD_IP, mac_addr=NEW_MAC))
     del ips._tarpit_active_targets[OLD_IP]
 
     ips._router_isolated_devices[OLD_MAC] = {"ip": OLD_IP, "hostname": "test-dev", "dev_id": DEV_ID}
@@ -85,7 +88,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
 
 
 # ── Section B: button-gate logic keyed off action_summary ──────────────────────────
-def _buttons_for(action_summary: str, client_ip: str = "1.2.3.4"):
+def _buttons_for(action_summary: str, dev_id: str = "dev-1"):
     """Mirror of pipeline.py's inline-keyboard button-gate logic. Kept as a literal
     copy (not imported) since pipeline.py's _step() is one giant method with no
     extractable unit under test — matches test_phase20_alert_quality.py's own
@@ -105,28 +108,28 @@ def _buttons_for(action_summary: str, client_ip: str = "1.2.3.4"):
     """
     keyboard = []
     if action_summary in ("tarpitted (Layer-2)", "router isolated", "auto-blocked"):
-        keyboard.append([{"text": "🔓 Release Device", "callback_data": f"unblock:{client_ip}"}])
+        keyboard.append([{"text": "🔓 Release Device", "callback_data": f"unblock:{dev_id}"}])
     elif action_summary == "awaiting approval":
         keyboard.append([
-            {"text": "🔒 Approve Hardware Isolation", "callback_data": f"block:{client_ip}"}
+            {"text": "🔒 Approve Hardware Isolation", "callback_data": f"block:{dev_id}"}
         ])
     return keyboard
 
 
 check("THE BUG's core scenario, now fixed: an already-tarpitted device gets ONLY a "
       "Release button, no 'Approve' (there's nothing left to approve)",
-      _buttons_for("tarpitted (Layer-2)") == [[{"text": "🔓 Release Device", "callback_data": "unblock:1.2.3.4"}]])
+      _buttons_for("tarpitted (Layer-2)") == [[{"text": "🔓 Release Device", "callback_data": "unblock:dev-1"}]])
 check("same fix for router-isolated devices",
-      _buttons_for("router isolated") == [[{"text": "🔓 Release Device", "callback_data": "unblock:1.2.3.4"}]])
+      _buttons_for("router isolated") == [[{"text": "🔓 Release Device", "callback_data": "unblock:dev-1"}]])
 check("same fix for an auto-blocked (domain-blocked) device",
-      _buttons_for("auto-blocked") == [[{"text": "🔓 Release Device", "callback_data": "unblock:1.2.3.4"}]])
+      _buttons_for("auto-blocked") == [[{"text": "🔓 Release Device", "callback_data": "unblock:dev-1"}]])
 check("BUGFIX (2026-08-29, user catch): a genuinely pending device (nothing done yet) "
       "now gets ONLY Approve, not a Release button too -- action_summary==\"awaiting "
       "approval\" is itself derived from containment_status finding nothing currently "
       "contained (see the branch order above it), so Release was guaranteed to no-op "
       "there every time, violating the same 'only show a button that would actually do "
       "something' principle the three checks above this one already enforce",
-      _buttons_for("awaiting approval") == [[{"text": "🔒 Approve Hardware Isolation", "callback_data": "block:1.2.3.4"}]])
+      _buttons_for("awaiting approval") == [[{"text": "🔒 Approve Hardware Isolation", "callback_data": "block:dev-1"}]])
 check("REGRESSION GUARD: 'monitoring only' (nothing queued, nothing done) gets NO "
       "hardware buttons at all, matching the 'monitoring only' status text",
       _buttons_for("monitoring only") == [])
@@ -138,7 +141,7 @@ check("BUGFIX (2026-09-01): a device that's ACTUALLY contained (e.g. autonomousl
       "longer takes interactive_blocking_enabled into account at all, matching that "
       "flag's actual meaning (gates NEW actions needing approval, not releasing an "
       "EXISTING one).",
-      _buttons_for("tarpitted (Layer-2)") == [[{"text": "🔓 Release Device", "callback_data": "unblock:1.2.3.4"}]])
+      _buttons_for("tarpitted (Layer-2)") == [[{"text": "🔓 Release Device", "callback_data": "unblock:dev-1"}]])
 
 # Guard the mirror above against silently drifting from the real pipeline.py source.
 _pipeline_src = (_PathForSysPath(__file__).resolve().parent.parent / "src" / "core" / "pipeline.py").read_text(encoding="utf-8")
@@ -152,7 +155,7 @@ check("REGRESSION GUARD: pipeline.py's real source still contains the awaiting-a
 check("REGRESSION GUARD: pipeline.py's awaiting-approval branch no longer also appends "
       "a Release Device button (catches a future edit silently reintroducing the "
       "guaranteed-no-op button)",
-      _pipeline_src.count('{"text": "🔓 Release Device", "callback_data": f"unblock:{client_ip}"}') == 1,
+      _pipeline_src.count('{"text": "🔓 Release Device", "callback_data": f"unblock:{dev_id}"}') == 1,
       "expected exactly ONE Release-Device button construction in the whole file "
       "(the already-contained branch) -- found a different count")
 check("REGRESSION GUARD (2026-09-01 fix): pipeline.py's button assembly no longer "

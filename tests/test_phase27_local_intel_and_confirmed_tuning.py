@@ -568,6 +568,15 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
     # ...then, once the canary window has elapsed, a SECOND run (same recurring cron this
     # script already runs on) opportunistically promotes it -- see _propose_and_promote()'s
     # own docstring for why this reuses the existing cadence rather than a new concept.
+    # 2026-10-13: promotion is confirmed only by a REAL nightly backtest (it ran the golden set) that started after
+    # the proposal -- train_fp no longer confirms its own proposals. Insert that nightly run here, the precondition a
+    # real deployment's nightly backtest_job provides.
+    store = GraphStore(str(state_dir / "v13_graph.db"))
+    store._conn.execute(
+        "INSERT INTO backtest_runs (run_id, started_at, finished_at, overall_pass, golden_set_result_json) "
+        "VALUES ('nightly_after_proposal', ?, ?, 1, '{\"passed\": true}')", (run1_now + 60, run1_now + 120))
+    store._maybe_commit()
+    store.close()
     run2_now = run1_now + 6.0 * 3600.0 + 1.0
     run_threshold_calibration(state_dir, now=run2_now)
 

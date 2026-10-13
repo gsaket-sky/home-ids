@@ -890,7 +890,7 @@ function renderDevicesView(){
     var macShort = (d.mac && d.mac.length > 19) ? d.mac.slice(0,17)+'…' : (d.mac || 'unknown');
     var c = d.containment || {};
     var containment = c.tarpitted || c.router_isolated
-      ? '<span class="containment-pill containment-active">🔒 '+(c.tarpitted && c.router_isolated ? 'Tarpit + Fritz!Box' : c.tarpitted ? 'Tarpit' : 'Fritz!Box')+'</span>'
+      ? '<span class="containment-pill containment-active">🔒 '+(c.tarpitted && c.router_isolated ? 'Tarpit + Router' : c.tarpitted ? 'Tarpit' : 'Router')+'</span>'
       : (c.blocked_domain_count ? '<span class="containment-pill containment-none">'+c.blocked_domain_count+' domain(s) blocked</span>' : '<span class="containment-pill containment-none">🔓</span>');
     return '<tr class="row-clickable" onclick="app.selectDevice(\''+d.device_id+'\')">'
       + '<td><div class="cell-title">'+esc(d.hostname)+'</div><div class="cell-mono">'+d.device_id+'</div></td>'
@@ -2680,15 +2680,15 @@ var app = {
 
   /* ---- containment: isolate / tarpit / release (device), block / unblock (domain) ---- */
   isolateRouter: function(deviceId, hostname){
-    if (!window.confirm('Isolate ' + hostname + ' via Fritz!Box WAN block? This cuts off its internet access until released.')) return;
+    if (!window.confirm('Isolate ' + hostname + ' via your router? Its internet access is cut until released.')) return;
     app._runDeviceAction(deviceId, 'isolate_router', '/api/devices/' + encodeURIComponent(deviceId) + '/isolate_router', 'Isolated via Fritz!Box.');
   },
   tarpitDevice: function(deviceId, hostname){
-    if (!window.confirm('Tarpit ' + hostname + ' (Layer-2 ARP/NDP)? This blackholes its LAN traffic until released.')) return;
+    if (!window.confirm('Tarpit ' + hostname + ' (Layer-2 ARP/NDP)? It loses internet access until released; over IPv6 it is also cut off from devices at home, over IPv4 it can still reach them.')) return;
     app._runDeviceAction(deviceId, 'tarpit', '/api/devices/' + encodeURIComponent(deviceId) + '/tarpit', 'Tarpitted.');
   },
   releaseDevice: function(deviceId, hostname){
-    if (!window.confirm('Release ' + hostname + ' from all containment (Fritz!Box isolation, tarpit, and any blocked domains)?')) return;
+    if (!window.confirm('Release ' + hostname + ' from all containment (router isolation, tarpit, and any blocked domains)?')) return;
     app._runDeviceAction(deviceId, 'release', '/api/devices/' + encodeURIComponent(deviceId) + '/release', 'Released.', 'POST', {});
   },
   _runDeviceAction: async function(deviceId, actionName, path, successMsg, method, body){

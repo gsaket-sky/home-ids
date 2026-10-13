@@ -42,6 +42,7 @@ from intelligence.detectors.threat_signals import ThreatSignalDetector  # PHASE 
 from argus.decision.engine import DecisionState
 from core.incident_tracker import IncidentTracker  # VERSION 10 (incident aggregation)
 from incident_key import incident_key as _incident_key
+from core.alert_attribution import attribute_alert_target, describe_target_set  # 2026-10-12: alert target from the evidence that fired
 from mitigation.alerts import AlertManager, AlertJSONWriter
 from mitigation.ips import IPSMitigator, CRITICAL_DEVICE_TYPES
 from mitigation.plain_explanation import build_plain_explanation
@@ -442,9 +443,9 @@ def _build_status_lines(action_summary: str, mixed_signal: bool) -> tuple:
     """
     contained_text = {
         "tarpitted (Layer-2)": (
-            "this device's network traffic is being intercepted and slowed to a crawl "
-            "at the network level (a \"tarpit\") -- it can't reliably reach anything "
-            "until released.",
+            "this device's internet access is cut on your local network (a \"tarpit\": "
+            "the IDS answers in place of your router) -- over IPv6 it can't reach devices "
+            "at home either; over IPv4 it still can. This holds until released.",
             "the tarpit stays active until you release it.",
         ),
         "router isolated": (
@@ -656,15 +657,6 @@ def _reapply_device_type_overrides(state_manager: Any, identity_manager: Any,
 # produce) to tell the two apart without needing a new signal anywhere upstream.
 _STATISTICAL_HARD_STOP_MARKERS = ("lateral movement", "exfiltration payload burst")
 
-# B2: how strongly each network evidence type points at "its" destination, used to pick the destination an
-# alert shows when several flows contributed. Unlisted types rank 2.0 (same as a medium notice).
-_NETWORK_EVIDENCE_STRENGTH = {
-    "zeek_lateral_scan": 4.0, "zeek_notice_highly_deterministic": 3.5, "malicious_ja3": 3.0,
-    "malicious_ja4": 3.0, "zeek_notice_strong": 2.5, "zeek_notice_medium": 2.0, "zeek_notice": 2.0,
-    "zeek_notice_weak": 1.0,
-}
-
-
 # B9 (2026-10-01): an alert listed the evidence for an attack but never said which ordinary explanations had been
 # looked at. The Windows-laptop alert was certificate-revocation traffic (User-Agent Microsoft-CryptoAPI) and Microsoft
 # telemetry; the reader had to work that out by hand. These are the background agents and URL shapes that explain a
@@ -688,7 +680,8 @@ def containment_code(status_text: str) -> str:
     substrings the Telegram summary keys on."""
     text = status_text or ""
     for needle, code in (("TARPITTED", "TARPITTED"), ("ROUTER ISOLATED", "ROUTER_ISOLATED"),
-                         ("DOMAIN BLOCKED", "DOMAIN_BLOCKED"), ("WAITING FOR APPROVAL", "AWAITING_APPROVAL"),
+                         ("DOMAIN BLOCKED", "DOMAIN_BLOCKED"), ("DOMAIN ALREADY ON BLOCKLIST", "DOMAIN_ALREADY_BLOCKED"),
+                         ("WAITING FOR APPROVAL", "AWAITING_APPROVAL"),
                          ("UNBLOCKED", "MONITORING_ONLY")):
         if needle in text:
             return code
@@ -1769,8 +1762,9 @@ class EnginePipeline:
                     features["suspicious_domains_z"]= calc_z(features.get("suspicious_domains", 0.0), state.dga_baseline)
                     features["outbound_bytes_z"]    = calc_z(features.get("zeek_outbound_bytes", 0.0), state.outbound_bytes_baseline)
 
-                    target_malicious_domain = self._select_target_domain(state, self.ti_engine)
-                    top_domain = target_malicious_domain
+                    # The window's most notable domain: context for the reputation lookups and ML features below.
+                    # Never an alert's target -- that comes from the evidence that fired (core/alert_attribution.py).
+                    top_domain = self._select_target_domain(state, self.ti_engine)
                     dest_ip = features.get("last_dest_ip", "unknown")
                     if not dest_ip or dest_ip == "unknown":
                         if top_domain and top_domain != "unknown":
@@ -2075,7 +2069,8 @@ class EnginePipeline:
                     if features.get("zeek_lateral_moves", 0) > 0 and lateral_unique_targets >= lateral_evidence_threshold:
                         lateral_target_examples = features.get("zeek_lateral_target_examples", []) or []
                         lateral_evidence_target = lateral_target_examples[0] if lateral_target_examples else None
-                        self.evidence_store.add(Evidence(type="zeek_lateral_scan", source="zeek", timestamp=now, device=dev_id, value=features["zeek_lateral_moves"], confidence=0.9, independence_group="zeek_network", provenance="detector:zeek:lateral_scan", domain=lateral_evidence_target))
+                        self.evidence_store.add(Evidence(type="zeek_lateral_scan", source="zeek", timestamp=now, device=dev_id, value=features["zeek_lateral_moves"], confidence=0.9, independence_group="zeek_network", provenance="detector:zeek:lateral_scan", domain=lateral_evidence_target,
+                                                         targets=tuple(lateral_target_examples), target_count=lateral_unique_targets))
 
                     # BUGFIX (reviewer suggestion, implemented): a device's own real-time
                     # HTTP/SSDP/DIAL requests to OTHER local devices for media-discovery
@@ -2520,6 +2515,7 @@ class EnginePipeline:
                                         device=str(state.device_id), hostname=str(hostname), signature=str(primary_sig)
                                     ).inc()
                                 decision["explanation"] = f"{decision['explanation']} (persisted {int(persisted_for)}s)"
+                                decision["persisted_seconds"] = int(persisted_for)
                                 # BUGFIX (live audit): 0.75 put a persistence-escalated alert's
                                 # confidence in the SAME range as argus/decision/engine.py's genuine
                                 # 2-independent-source HIGH (0.85) -- indistinguishable in the
@@ -2575,9 +2571,7 @@ class EnginePipeline:
 
                             outbound_bytes = features.get("zeek_outbound_bytes", 0)
                             data_classification = classify_payload_size(outbound_bytes)
-                            dest_port = features.get("last_dest_port", 0)
                             dest_proto = features.get("dominant_protocol", "UNKNOWN")
-                            service_name = classify_service(dest_port, dest_proto)
 
                             dns_seq_lines = []
                             if hasattr(state, "rolling") and hasattr(state.rolling, "events"):
@@ -2587,322 +2581,38 @@ class EnginePipeline:
 
                             dns_seq_str = "\n".join(dns_seq_lines) if dns_seq_lines else "  No recent DNS events"
 
-                            # PHASE 21D2 FIX: `dest_ip` above is generically "this device's
-                            # most recent real connection" (features["last_dest_ip"]),
-                            # tracked independently of which detector actually fired -- fine
-                            # for a normal DNS-driven alert (the decision engine selects the
-                            # triggering domain/IP together via _select_target_domain()), but
-                            # DNS_EVASION has no domain and can flag SEVERAL unexplained IPs
-                            # at once, so "most recent connection" isn't necessarily one of
-                            # them. Without this, mark_false_positive()'s IP-immunization
-                            # routing (the CL-AFPE) could immunize the wrong IP on a
-                            # DNS_EVASION correction -- the actual unexplained one stays
-                            # unaddressed and can keep re-firing. dns_evasion.py attaches one
-                            # representative unexplained IP onto its Evidence.domain field
-                            # specifically so this alert-building step can prefer it here.
-                            # BUGFIX: every domain-attribution branch below was written
-                            # against the clean, un-suffixed signature name -- primary_sig_base
-                            # (computed earlier, stripping any " (persisted Ns)" suffix from
-                            # the cross-cycle escalation step) is used here instead of raw
-                            # primary_sig so persisted alerts get the same correct attribution
-                            # as fresh ones. See primary_sig_base's own comment above for the
-                            # full incident writeup.
-                            # VERSION 11: DNS_ATTRIBUTION_GAP is DNSEvasionHypothesis's other
-                            # possible name (see argus/hypotheses/engine.py) -- same evidence type,
-                            # same "no domain, dest_ip is the real target" shape, just a
-                            # weaker/more honestly-named sub-case, so it needs the identical
-                            # attribution handling as DNS_EVASION in every branch below.
-                            alert_dest_ip = dest_ip
-                            if primary_sig_base in ("DNS_EVASION", "DNS_ATTRIBUTION_GAP", "DNS_POLICY_BYPASS"):
-                                for ev in active_evidence:
-                                    if ev.type == "dns_evasion_anomaly" and ev.domain:
-                                        alert_dest_ip = ev.domain
-                                        break
-
-                            # BUGFIX (found via production alerts.json audit): same class of bug as
-                            # the DNS_EVASION fix above. target_malicious_domain comes ONLY from
-                            # _select_target_domain()'s "most notable domain in the whole window"
-                            # scan -- independent of which evidence/hypothesis actually fired. For
-                            # DNS_COVERT_TUNNELING (DNSTunnelingV2Hypothesis, keyed on dns_tunnel_v2
-                            # evidence), this produced alerts whose displayed queried_domain had NO
-                            # causal relationship to the actual tunneling finding -- confirmed in
-                            # production data showing benign domains (init.push.apple.com,
-                            # time.g.aaplimg.com, an AWS device-hash subdomain) displayed as the
-                            # "target" of a tunneling alert that couldn't possibly have fired on
-                            # them (they're all in the CDN/telemetry allowlist). threat_signals.py
-                            # already attaches the REAL triggering domain onto dns_tunnel_v2
-                            # evidence's own .domain field (see its own comment on this exact
-                            # transparency gap) -- this was simply never consumed here.
-                            alert_target_domain = target_malicious_domain
-                            if primary_sig_base == "DNS_COVERT_TUNNELING":
-                                for ev in active_evidence:
-                                    if ev.type == "dns_tunnel_v2" and ev.domain:
-                                        alert_target_domain = ev.domain
-                                        break
-                            # BUGFIX: same gap, DGA_BOTNET_C2/dns_dga_burst instead of
-                            # DNS_COVERT_TUNNELING/dns_tunnel_v2 -- dns_dga_burst was a pure
-                            # device-wide aggregate (count of recent domains that looked
-                            # DGA-like) with no domain attached at all until threat_signals.py
-                            # started collecting real examples from the same per-domain loop
-                            # that counts them. Confirmed in production: the SAME displayed
-                            # domain showing wildly different max_label_length across
-                            # consecutive alerts, and the SAME domain family spread across 6+
-                            # unrelated devices with zero threat-intel corroboration -- both
-                            # symptoms of this exact attribution gap, not necessarily evidence
-                            # of a real coordinated threat across those devices.
-                            elif primary_sig_base == "DGA_BOTNET_C2":
-                                for ev in active_evidence:
-                                    if ev.type == "dns_dga_burst" and ev.domain:
-                                        alert_target_domain = ev.domain
-                                        break
-                            # BUGFIX: found via a live alert audit -- unlike the two branches
-                            # above (which replace the fallback with a REAL evidence-linked
-                            # domain), DNS_EVASION structurally has no domain at all by design
-                            # (that's the whole signature: real traffic, no DNS explanation) --
-                            # yet alert_target_domain had no branch for it either, so it stayed
-                            # as target_malicious_domain, a coincidentally-queried, causally-
-                            # unrelated domain the device happened to also look up. This
-                            # polluted network_context["queried_domain"] (used by
-                            # train_fp_classifier.py's f1_entropy feature, among other
-                            # consumers) with a real-looking but meaningless domain for every
-                            # DNS_EVASION alert -- confirmed live, alongside the earlier
-                            # target_display fix which only patched the Telegram TEXT, not this
-                            # underlying field. alert_dest_ip (computed just above) already
-                            # correctly carries the real flagged IP into destination_ip -- this
-                            # just stops a second, unrelated domain from also being attached
-                            # where none exists.
-                            elif primary_sig_base in ("DNS_EVASION", "DNS_ATTRIBUTION_GAP", "DNS_POLICY_BYPASS"):
-                                alert_target_domain = "unknown"
-                            # BUGFIX: found via a live third-party review of a real CRITICAL
-                            # alert -- argus/decision/engine.py's tier-5 reputation escalation
-                            # ("Confirmed Malicious IOC", rep.tier==5) is a SEPARATE verdict
-                            # path from the hypothesis competition above; it never got a
-                            # branch here either, so it stayed on target_malicious_domain
-                            # too. reputation_target (computed alongside ti_risk/abuse_risk/
-                            # vt_risk above) is the domain/IP that actually earned the tier-5
-                            # classification -- use it here for the same reason the branches
-                            # above use their own evidence-linked domain, so the alert
-                            # displays/records/immunizes the real source of the risk, not an
-                            # unrelated bystander domain. reputation_target may be an IP
-                            # (abuse_risk and part of vt_risk are IP-only signals) rather
-                            # than a domain, so route it to whichever field actually fits.
-                            # SECURITY FIX (alert/evidence/decision-engine consistency audit,
-                            # 2026-09-28): "Confirmed Malicious IOC" is only ONE of four
-                            # explanation strings argus/decision/engine.py's tier-4/tier-5 reputation
-                            # branches can produce (argus/decision/engine.py's rep.tier==5/
-                            # rep.tier==4 branches; identical strings in src/argus/decision/
-                            # engine.py, the live default) -- "Corroborated Reputation Signal"
-                            # (tier5, corroborated-but-not-verified-IOC) and both "Elevated
-                            # Reputation Signal (Unconfirmed...)" variants (tier5-uncorroborated,
-                            # SUSPICIOUS -- alerts; tier4-unconfirmed, SUSPICIOUS -- alerts) had NO
-                            # branch here at all, so they silently fell through to
-                            # target_malicious_domain, the exact "unrelated bystander domain"
-                            # failure mode this whole attribution-fix pattern exists to close.
-                            # All four verdicts are driven by the SAME reputation computation
-                            # (ti_risk/abuse_risk/vt_risk above), so reputation_target is equally
-                            # valid for all of them, not just the verified_ioc case.
-                            elif primary_sig_base in (
-                                "Confirmed Malicious IOC",
-                                "Corroborated Reputation Signal",
-                                "Elevated Reputation Signal (Unconfirmed, Tier 5 Score)",
-                                "Elevated Reputation Signal (Unconfirmed)",
-                            ):
+                            # What this alert is about comes ONLY from the evidence that fired for its signature
+                            # (core/alert_attribution.py, 2026-10-12): no "most notable domain in the window", no "last
+                            # connection" address. A signature without an evidence-linked target is device-level
+                            # ("unknown"); a scan names its set (count + examples). Every per-signature rule that used to
+                            # live here moved there, with its history.
+                            _alert_target = attribute_alert_target(
+                                primary_sig_base, active_evidence, decision.get("winning_evidence", []),
+                                reputation_target=reputation_target,
+                                wire_ip_of=self.zeek_fx.get_wire_ip if self.zeek_fx else None,
+                            )
+                            alert_dest_ip = _alert_target.dest_ip
+                            alert_target_domain = _alert_target.domain
+                            # The port and service belong to the attributed destination: the window's last connection
+                            # (features["last_dest_port"]) only when that connection IS the destination.
+                            if alert_dest_ip != "unknown" and alert_dest_ip == features.get("last_dest_ip"):
+                                dest_port = features.get("last_dest_port", 0)
+                            elif alert_dest_ip != "unknown" and self.zeek_fx:
+                                dest_port = self.zeek_fx.get_dest_ports(known_ips_snapshot).get(alert_dest_ip, 0)
+                            else:
+                                dest_port = 0
+                            service_name = classify_service(dest_port, dest_proto)
+                            # ...and so does the network owner every downstream guard reads (CL-AFPE's cloud/VPN
+                            # guards, the confirmed-intel write below): asn_owner above belongs to the window's dest_ip.
+                            alert_asn_owner = "Unknown"
+                            if alert_dest_ip == dest_ip:
+                                alert_asn_owner = asn_owner
+                            elif alert_dest_ip != "unknown" and self.geoip_engine:
                                 try:
-                                    ipaddress.ip_address(reputation_target)
-                                    alert_dest_ip = reputation_target
-                                    alert_target_domain = "unknown"
-                                except (ValueError, TypeError):
-                                    alert_target_domain = reputation_target or "unknown"
-                            # BUGFIX (live audit): same attribution gap as the branches above,
-                            # for the signature types that had NO branch at all until now --
-                            # confirmed live, 3,179 alerts across 18 devices where these four
-                            # signatures displayed some OTHER device's DNS resolver or a
-                            # broadcast address as "destination_ip", purely because dest_ip
-                            # defaulted to "whatever this device connected to most recently,"
-                            # with zero relation to which evidence actually fired. Each of
-                            # these evidence types now carries a real .domain (zeek_features.py/
-                            # threat_signals.py/zeek_network.py changes, this same session) --
-                            # this just consumes it, same pattern as every branch above.
-                            # VERSION 12 (G7): PORT_SCAN/INTERNAL_RECONNAISSANCE are
-                            # ConnectionAbuseHypothesis's own dynamic names for a single-category
-                            # zeek_conn_abuse-only / arp_sweep-only finding (argus/hypotheses/engine.py) --
-                            # same evidence types, same attribution logic applies regardless of
-                            # which of the three names this cycle's finding actually got.
-                            elif primary_sig_base in ("CONNECTION_ABUSE", "PORT_SCAN", "INTERNAL_RECONNAISSANCE"):
-                                # BUGFIX (live audit, follow-up): zeek_conn_abuse's domain is a
-                                # genuinely singular target (one specific rejected connection);
-                                # arp_sweep's is only ONE of potentially hundreds of swept IPs,
-                                # picked somewhat arbitrarily -- prefer the more specific one
-                                # when both fired, instead of "whichever happens to iterate
-                                # first in active_evidence" (evidence-store insertion order,
-                                # not meaningfulness).
-                                conn_abuse_ev_domain = None
-                                arp_sweep_ev_domain = None
-                                for ev in active_evidence:
-                                    if ev.type == "zeek_conn_abuse" and ev.domain and not conn_abuse_ev_domain:
-                                        conn_abuse_ev_domain = ev.domain
-                                    elif ev.type == "arp_sweep" and ev.domain and not arp_sweep_ev_domain:
-                                        arp_sweep_ev_domain = ev.domain
-                                chosen = conn_abuse_ev_domain or arp_sweep_ev_domain
-                                if chosen:
-                                    alert_dest_ip = chosen
-                                    alert_target_domain = "unknown"
-                            # VERSION 12 (G7): LATERAL_MOVEMENT is NetworkIntrusionHypothesis's own
-                            # dynamic name whenever zeek_lateral_scan drove the finding
-                            # (argus/hypotheses/engine.py) -- same evidence types, same attribution logic.
-                            elif primary_sig_base in ("NETWORK_INTRUSION", "LATERAL_MOVEMENT"):
-                                # BUGFIX (explicit user request, 2026-09-09): "zeek_notice"
-                                # fragmented into 4 evidence_type values by tier -- ev.type ==
-                                # "zeek_notice" (bare) also still matched for evidence written
-                                # before this deploy, still valid within the 24h graph window.
-                                # B2 (2026-10-01): was "the first item that has a domain" -- one
-                                # alert merges evidence from different flows, so the destination
-                                # shown could belong to a weak notice rather than the evidence that
-                                # actually drove the alert. Use the destination of the STRONGEST item.
-                                _best_rank, _best_ev = None, None
-                                for ev in active_evidence:
-                                    if not ((ev.type in ("zeek_lateral_scan", "malicious_ja3", "malicious_ja4", "zeek_notice")
-                                             or ev.type in ZEEK_NOTICE_EVIDENCE_TYPES) and ev.domain):
-                                        continue
-                                    _rank = (_NETWORK_EVIDENCE_STRENGTH.get(ev.type, 2.0),
-                                             float(getattr(ev, "confidence", 0.0) or 0.0),
-                                             float(getattr(ev, "timestamp", 0.0) or 0.0))
-                                    if _best_rank is None or _rank > _best_rank:
-                                        _best_rank, _best_ev = _rank, ev
-                                if _best_ev is not None:
-                                    alert_dest_ip = _best_ev.domain
-                                    alert_target_domain = "unknown"
-                            # BUGFIX (live audit, 2026-09-09): COORDINATED_TARGETING/
-                            # PEER_COHORT_DEVIATION had no branch here at all -- their
-                            # evidence (coordinated_targeting/peer_deviation) is argus-only,
-                            # synthesized inside decision_engine.evaluate() from graph
-                            # queries and never written into pipeline.py's own
-                            # active_evidence store, so both signatures silently fell
-                            # through to the generic dest_ip fallback ("whatever this
-                            # device connected to most recently"). Confirmed live: the two
-                            # highest-volume signatures (~57% of unsuppressed HIGH alerts
-                            # in a 7h sample) were displayed as "Contacted 224.0.0.22" /
-                            # "Contacted ff02::1" / "Contacted unknown" -- multicast/
-                            # broadcast noise the multicast-exclusion fix (1ff6c97)
-                            # already correctly keeps OUT of the actual scoring, just
-                            # never made it into the display. decision.get("winning_evidence")
-                            # (decision/engine.py, this same session) carries the real
-                            # argus-only evidence that satisfied the winning hypothesis.
-                            # coordinated_targeting DOES have a real destination_id (the
-                            # destination multiple devices targeted); peer_deviation is
-                            # device-level by design (destination_id=NO_DESTINATION,
-                            # live_engine.py) -- explicitly "unknown" here rather than a
-                            # misleading fallback, same treatment as the DNS_EVASION
-                            # "no domain by design" branch above.
-                            elif primary_sig_base == "COORDINATED_TARGETING":
-                                alert_target_domain = "unknown"
-                                for we in decision.get("winning_evidence", []):
-                                    dest = we.get("destination_id")
-                                    if we.get("evidence_type") == "coordinated_targeting" and dest and dest != "(none)":
-                                        alert_dest_ip = dest
-                                        break
-                            elif primary_sig_base == "PEER_COHORT_DEVIATION":
-                                alert_dest_ip = "unknown"
-                                alert_target_domain = "unknown"
-                            # BUGFIX (live audit, 2026-09-09, same pass as COORDINATED_TARGETING/
-                            # PEER_COHORT_DEVIATION above): a broader check across every
-                            # HYPOTHESIS_RELEVANT_EVIDENCE_TYPES name found 4 more signatures
-                            # falling through to the same generic dest_ip fallback with no branch
-                            # of their own -- DNS_TUNNELING, DATA_EXFILTRATION, C2_BEACONING,
-                            # SIGNATURE_MATCHED_THREAT (plus argus/decision/engine.py's own hard-stop
-                            # name for the same underlying evidence, "Confirmed Exploit/Malware
-                            # Signature (Suricata)"). DNS_TUNNELING's own evidence
-                            # (dns_rate/dns_entropy/dns_unique_ratio, detectors/dns_behavior.py)
-                            # never sets .domain at all -- a genuine device-wide DNS-rate
-                            # aggregate, no single destination to name, same "destination-less by
-                            # design" shape as PEER_COHORT_DEVIATION above.
-                            # SECURITY FIX (P0-1, third-party architecture review, 2026-09-28):
-                            # dns_rate/dns_unique_ratio are genuine device-wide aggregates with no
-                            # single destination to name, but dns_entropy is different -- it's
-                            # also a window average, yet ONE specific domain's label is what
-                            # actually pushed that average over the threshold. dns_features.py now
-                            # tracks that domain (top_entropy_domain) and dns_behavior.py attaches
-                            # it to dns_entropy Evidence -- prefer it here, same pattern as
-                            # DNS_COVERT_TUNNELING/DGA_BOTNET_C2 above, falling back to "unknown"
-                            # only when genuinely absent (verdict driven by dns_rate/
-                            # dns_unique_ratio alone, which still have no single domain to name).
-                            elif primary_sig_base == "DNS_TUNNELING":
-                                alert_dest_ip = "unknown"
-                                alert_target_domain = "unknown"
-                                for ev in active_evidence:
-                                    if ev.type == "dns_entropy" and ev.domain:
-                                        alert_target_domain = ev.domain
-                                        break
-                            # DATA_EXFILTRATION/C2_BEACONING's own evidence (zeek_exfiltration/
-                            # zeek_beaconing, detectors/threat_signals.py) has the SAME known gap
-                            # argus/ops/live_engine.py's own _NEEDS_LAST_DEST_IP_FALLBACK already
-                            # documents and patches (a last-known-dest-IP fallback, applied when
-                            # argus converts this cycle's detector evidence to its own model) -- so
-                            # decision.get("winning_evidence") already carries a usable
-                            # destination_id for these two, the same field COORDINATED_TARGETING
-                            # above reads, no new plumbing needed.
-                            elif primary_sig_base == "DATA_EXFILTRATION":
-                                alert_target_domain = "unknown"
-                                for we in decision.get("winning_evidence", []):
-                                    dest = we.get("destination_id")
-                                    if we.get("evidence_type") == "zeek_exfiltration" and dest and dest != "(none)" and dest != "unknown":
-                                        alert_dest_ip = dest
-                                        break
-                            elif primary_sig_base == "C2_BEACONING":
-                                alert_target_domain = "unknown"
-                                for we in decision.get("winning_evidence", []):
-                                    dest = we.get("destination_id")
-                                    if we.get("evidence_type") == "zeek_beaconing" and dest and dest != "(none)" and dest != "unknown":
-                                        alert_dest_ip = dest
-                                        break
-                            # SIGNATURE_MATCHED_THREAT (SuricataSignatureHypothesis, a
-                            # corroborating-evidence-tier Suricata match) and "Confirmed Exploit/
-                            # Malware Signature (Suricata)" (argus/decision/engine.py's own hard-stop
-                            # name for a high-confidence Suricata match) are two different verdict
-                            # PATHS over the exact same suricata_signature_match evidence
-                            # (detectors/suricata_scan.py), which already sets a real .domain
-                            # (target_ip) directly on the detector evidence -- same simple pattern as
-                            # the NETWORK_INTRUSION/ARP-spoofing/honeypot branches above, no
-                            # winning_evidence needed.
-                            # SECURITY FIX (alert/evidence/decision-engine consistency audit,
-                            # 2026-09-28): "Confirmed Exploit/Malware Signature (Suricata,
-                            # Uncorroborated)" -- argus/decision/engine.py's HIGH/alert-tier variant of
-                            # the same hard-stop, fired when a real severity=1 Suricata match
-                            # isn't independently corroborated -- was missing from this tuple, so
-                            # it fell through to the generic fallback exactly like the four
-                            # reputation-signal gaps just above. Same evidence
-                            # (suricata_signature_match), same attribution.
-                            elif primary_sig_base in (
-                                "SIGNATURE_MATCHED_THREAT",
-                                "Confirmed Exploit/Malware Signature (Suricata)",
-                                "Confirmed Exploit/Malware Signature (Suricata, Uncorroborated)",
-                            ):
-                                for ev in active_evidence:
-                                    if ev.type == "suricata_signature_match" and ev.domain:
-                                        alert_dest_ip = ev.domain
-                                        alert_target_domain = "unknown"
-                                        break
-                            elif primary_sig_base == "Layer-2 ARP Spoofing Detected":
-                                for ev in active_evidence:
-                                    if ev.type == "arp_spoofing" and ev.domain:
-                                        alert_dest_ip = ev.domain
-                                        alert_target_domain = "unknown"
-                                        break
-                            elif primary_sig_base == "Internal Honeypot Accessed":
-                                for ev in active_evidence:
-                                    if ev.type == "honeypot_access" and ev.domain:
-                                        alert_dest_ip = ev.domain
-                                        alert_target_domain = "unknown"
-                                        break
-                            # VERSION 12 (G6): "(Uncorroborated)" is argus/decision/engine.py's own
-                            # suffix for the demoted HIGH case (geography alone, no behavioral
-                            # corroboration) -- same evidence type/attribution applies either way.
-                            elif primary_sig_base in ("Geofencing Policy Violation", "Geofencing Policy Violation (Uncorroborated)"):
-                                for ev in active_evidence:
-                                    if ev.type == "geofencing_violation" and ev.domain:
-                                        alert_dest_ip = ev.domain
-                                        alert_target_domain = "unknown"
-                                        break
+                                    _aa = self.geoip_engine.lookup_asn(alert_dest_ip)
+                                    alert_asn_owner = getattr(_aa, "autonomous_system_organization", None) or "Unknown"
+                                except Exception:
+                                    alert_asn_owner = "Unknown"
 
                             # VERSION 10 (incident aggregation): computed here, once, using the
                             # already-corrected alert_dest_ip/alert_target_domain (not the raw
@@ -2912,6 +2622,9 @@ class EnginePipeline:
                             # would silently re-fragment incident grouping the same way the
                             # persistence-suffix bug once fragmented alert attribution.
                             incident_id = _incident_key(dev_id, alert_dest_ip, alert_target_domain, primary_sig_base)
+                            # Containment this alert causes (graph action ids), linked to its alert_event below (W-10).
+                            _containment_actions: List[str] = []
+                            _pending_domain_action_id: Optional[str] = None   # a domain block awaiting a person
 
                             alert_payload = {
                                 "type": "ids_alert",
@@ -2932,9 +2645,18 @@ class EnginePipeline:
                                     "destination_ip": alert_dest_ip, "destination_port": dest_port, "service_name": service_name,
                                     "data_type": dest_proto, "payload_size_bytes": outbound_bytes, "payload_classification": data_classification,
                                     "queried_domain": alert_target_domain,
+                                    # 2026-10-12: a scan-shaped finding names its set (kind, count, examples);
+                                    # target_source = the evidence type the target came from ("" = device-level).
+                                    "target_set": _alert_target.target_set,
+                                    "target_source": _alert_target.source,
                                 },
                                 "risk": risk,
                                 "signature": primary_sig,
+                                # the signature without the " (persisted Ns)" escalation suffix, and that duration as
+                                # its own field (None when not escalated). "signature" keeps the suffixed text for
+                                # existing readers (composite trust, CL-AFPE and the incident key strip it themselves).
+                                "signature_base": primary_sig_base,
+                                "persisted_seconds": decision.get("persisted_seconds"),
                                 "factors": factors,
                                 "features": features,
                                 "schema": "home_ids_alerts_v3",
@@ -3050,7 +2772,7 @@ class EnginePipeline:
                                 alert_payload=alert_payload,
                                 features=features,
                                 decision=decision,
-                                asn_owner=asn_owner if asn_owner != "Unknown" else "",
+                                asn_owner=alert_asn_owner if alert_asn_owner != "Unknown" else "",
                                 now=now,
                             )
                             record_cl_afpe_verdict(fp_verdict, alert_payload)
@@ -3242,7 +2964,7 @@ class EnginePipeline:
                                     # fallback -- otherwise containment could block/track a benign
                                     # "most frequent domain" instead of the domain actually implicated
                                     # by the evidence that authorized this containment decision.
-                                    self.ips_mitigator.mitigate(
+                                    _mit_result = self.ips_mitigator.mitigate(
                                         st=state,
                                         target_domain=alert_target_domain,
                                         risk_score=risk,
@@ -3256,13 +2978,32 @@ class EnginePipeline:
                                         ti_engine=self.ti_engine,
                                         reason=primary_sig,
                                         fp_verdict=fp_verdict,
-                                        decision_state=containment_decision_state
-                                    )
+                                        decision_state=containment_decision_state,
+                                        # recorded with every block / isolation this call creates (2026-10-12)
+                                        alert_ref={"incident_id": incident_id, "signature": primary_sig_base,
+                                                   "target_source": _alert_target.source,
+                                                   "evidence_types": sorted({ev.type for ev in active_evidence}
+                                                                            | set(decision.get("evidence_types", [])))},
+                                    ) or {}
+                                    _containment_actions = list(_mit_result.get("actions") or [])
+                                    if _mit_result.get("pending_domain_block"):
+                                        # interactive mode: the block waits for the operator's "Approve" (Telegram)
+                                        _pending_domain_action_id = uuid.uuid4().hex[:10]
+                                        self.state_manager.record_action(
+                                            action_id=_pending_domain_action_id, action_type="pending_domain_block",
+                                            target=_mit_result["pending_domain_block"], device_id=dev_id,
+                                            hostname=hostname,
+                                            ttl_seconds=float(self.config.get("pending_block_ttl_seconds", 86400.0)),
+                                            extra={"domain": _mit_result["pending_domain_block"], "device_ip": client_ip,
+                                                   "reason": primary_sig, "incident_id": incident_id,
+                                                   "signature": primary_sig_base,
+                                                   "target_source": _alert_target.source})
                                     containment_status = self.ips_mitigator.get_containment_status(
                                         client_ip=client_ip,
                                         mac_addr=getattr(state, "mac_address", "unknown"),
                                         domain=alert_target_domain,
-                                        dev_id=dev_id
+                                        dev_id=dev_id,
+                                        incident_id=incident_id,
                                     )
                                     # V13 FULL-ARCHITECTURE PLAN, PHASE 7 (presentation-layer drift
                                     # guard): get_containment_status() above (ips.py's own 3-dict
@@ -3330,7 +3071,7 @@ class EnginePipeline:
                                 # nothing) for the operator-verified is_ip_verified_safe -- see that
                                 # flag's own definition comment for why hostname-pattern-only safety
                                 # must not suppress this either.
-                                if (
+                                _hardware_approval_pending = (
                                     (
                                         bool(self.config.get("interactive_blocking_enabled", False))
                                         or getattr(state, "device_type", "unknown") in CRITICAL_DEVICE_TYPES
@@ -3338,7 +3079,8 @@ class EnginePipeline:
                                     and "UNBLOCKED" in containment_status
                                     and (risk >= 8.5 or lateral_threat)
                                     and not is_ip_verified_safe
-                                ):
+                                )
+                                if _hardware_approval_pending or (_pending_domain_action_id and "UNBLOCKED" in containment_status):
                                     containment_status = "⏳ WAITING FOR APPROVAL (Action Required via Inline Buttons below)"
                                 # W-10: the persisted alert carries the containment outcome (it used to exist only in
                                 # the Telegram text). Absent when the alert was suppressed before any containment step.
@@ -3383,30 +3125,19 @@ class EnginePipeline:
                             # second, non-redundant confirmation path, not a duplicate of the one
                             # inside the CL-AFPE. Same not-suppressed gate as the trigger above.
                             if telegram_worthy and not fp_verdict["suppress"]:
-                                # BUGFIX: alert_target_domain, not target_malicious_domain -- see its
-                                # own comment above. Feeding the local confirmed-intel store (which a
-                                # DIFFERENT device's future connection can hard-stop against) the
-                                # wrong domain would teach the network to remember the wrong thing.
-                                # FURTHER BUGFIX (found via a live state-folder audit): alert_target_domain
-                                # is only ever evidence-linked for the two signatures explicitly handled
-                                # above (DNS_COVERT_TUNNELING/DGA_BOTNET_C2) -- for every other signature
-                                # reaching HIGH/CRITICAL (e.g. CONNECTION_ABUSE via arp_sweep + a second
-                                # corroborating source, with no domain involved in the actual evidence at
-                                # all), alert_target_domain still equals target_malicious_domain, the
-                                # generic "most notable domain in the window" fallback -- confirmed live:
-                                # sharepoint.com/coinbase.com/alibaba.com/aws.dev/nflximg.com/
-                                # vscode-cdn.net/claudeusercontent.com/epson.biz all got poisoned as
-                                # "confirmed malicious" this exact way. Only pass a domain here when it
-                                # was actually overridden by real evidence above, never the raw fallback.
-                                domain_is_evidence_linked = alert_target_domain != target_malicious_domain
+                                # Only what the alert's own evidence names is recorded (core/alert_attribution.py):
+                                # the window's "most notable domain" and "last connection" once taught the
+                                # network-wide store sharepoint.com / coinbase.com / provider addresses as
+                                # "confirmed malicious". A device-level alert records nothing but the count.
+                                _linked = _alert_target.evidence_linked
                                 self.cl_afpe.record_confirmed_threat(
                                     dev_id,
-                                    etld1(alert_target_domain) if domain_is_evidence_linked else None,
-                                    dest_ip, reason="HIGH_CRITICAL_DECISION",
+                                    etld1(alert_target_domain) if _linked and alert_target_domain != "unknown" else None,
+                                    alert_dest_ip if _linked else None, reason="HIGH_CRITICAL_DECISION",
                                     signature=primary_sig,
-                                    asn_owner=asn_owner if asn_owner != "Unknown" else "",
-                                    # the port THIS device used for dest_ip: a VPN tunnel endpoint is never recorded
-                                    dest_port=self.zeek_fx.get_dest_ports(known_ips_snapshot).get(dest_ip),
+                                    asn_owner=alert_asn_owner if alert_asn_owner != "Unknown" else "",
+                                    # the port THIS device used for that address: a VPN tunnel endpoint is never recorded
+                                    dest_port=dest_port or None,
                                 )
 
                             # VERSION 10 (incident aggregation): the same device+target+signature
@@ -3554,6 +3285,9 @@ class EnginePipeline:
                                         plain_explanation=plain_explanation,
                                         alert_payload=alert_payload,
                                     )
+                                    # W-10 remainder: the containment this alert caused points at its alert_event
+                                    for _aid in _containment_actions:
+                                        argus_live_engine.get_graph_store().link_containment_action(_aid, alert_event_id)
                                 except Exception as exc:
                                     LOGGER.warning(
                                         "Failed to write alert_event for decision %r, %s -- "
@@ -3994,7 +3728,19 @@ class EnginePipeline:
                                                 )
                                                 peer_stat_shown = True
                                             break
-                                    if not peer_stat_shown:
+                                    _set_text = describe_target_set(_alert_target.target_set)
+                                    if peer_stat_shown:
+                                        pass
+                                    elif _set_text and target_display == "unknown":
+                                        # 2026-10-12: a scan names its set, not one arbitrary member of it.
+                                        _set_line = {"swept_hosts": "Looked up the hardware addresses of {} on the local network",
+                                                     "rejected_connections": "Tried to connect to {} (refused or no answer)",
+                                                     "lateral_targets": "Connected to {} on the local network"}.get(
+                                            _alert_target.target_set.get("kind"), "Reached {}")
+                                        alert_msg += "- " + _set_line.format(_set_text) + "\n"
+                                    elif target_display == "unknown":
+                                        alert_msg += "- Device-level finding: no single destination\n"
+                                    else:
                                         alert_msg += f"- Contacted `{target_display}`{target_geo_note} ({service_name} / Port {dest_port})\n"
                                     # BUGFIX (live alert audit): get_app_context()'s generic fallback
                                     # (no HTTP User-Agent seen) is literally f"{proto} Port {port}" --
@@ -4166,14 +3912,24 @@ class EnginePipeline:
                                     # can only ever be set when interactive_blocking_enabled is True in
                                     # the first place (see the containment_status rewrite above,
                                     # ~line 1841), so gating it a second time here was always redundant.
+                                    # The buttons name the DEVICE (containment T1, 2026-10-12): the address at alert
+                                    # time may belong to another device by the time the button is pressed.
                                     if action_summary in ("tarpitted (Layer-2)", "router isolated", "auto-blocked"):
                                         inline_keyboard.append([
-                                            {"text": "🔓 Release Device", "callback_data": f"unblock:{client_ip}"}
+                                            {"text": "🔓 Release Device", "callback_data": f"unblock:{dev_id}"}
                                         ])
                                     elif action_summary == "awaiting approval":
-                                        inline_keyboard.append([
-                                            {"text": "🔒 Approve Hardware Isolation", "callback_data": f"block:{client_ip}"}
-                                        ])
+                                        # one button per action actually waiting (a domain block alone must not offer
+                                        # a hardware isolation nobody queued)
+                                        if _hardware_approval_pending:
+                                            inline_keyboard.append([
+                                                {"text": "🔒 Approve Hardware Isolation", "callback_data": f"block:{dev_id}"}
+                                            ])
+                                        if _pending_domain_action_id:
+                                            inline_keyboard.append([
+                                                {"text": "🚫 Approve blocking the domain",
+                                                 "callback_data": f"blockdomain:{_pending_domain_action_id}"}
+                                            ])
 
                                     # PHASE 6 (operator-driven self-healing, closed loop): record a
                                     # "published_alert" action-ledger entry for EVERY published alert,
@@ -4184,24 +3940,30 @@ class EnginePipeline:
                                     # feedback for the FP-reduction training loop, not a hardware
                                     # containment decision, so it should be available whether or not
                                     # hardware isolation buttons are enabled.
-                                    if target_display and target_display != "unknown":
-                                        publish_action_id = uuid.uuid4().hex[:10]
-                                        feedback_ttl = float(self.config.get("fp_operator_feedback_ttl_seconds", 30 * 86400.0))
-                                        self.state_manager.record_action(
-                                            action_id=publish_action_id, action_type="published_alert",
-                                            target=target_display, device_id=dev_id, hostname=hostname,
-                                            ttl_seconds=feedback_ttl,
-                                            # alert_event_id (2026-09-22): lets a later operator tap
-                                            # (immunize/revoke) record a real operator_actions row
-                                            # against the SAME alert_event this ledger entry is about,
-                                            # instead of having zero durable link between the two.
-                                            # None whenever this cycle's graph write didn't happen --
-                                            # the Telegram action itself is entirely unaffected either way.
-                                            extra={"alert_payload": alert_payload, "alert_event_id": alert_event_id},
-                                        )
-                                        inline_keyboard.append([
-                                            {"text": "🛡️ Mark False Positive", "callback_data": f"immunize:{publish_action_id}"}
-                                        ])
+                                    # Every published alert gets its correction button. This was gated on a known
+                                    # target_display, but the correction runs from the stored alert_payload
+                                    # (pihole_api._ipc_immunize_logic -> CL-AFPE mark_false_positive); the target only
+                                    # names it in the audit row. Device-level alerts (PEER_COHORT_DEVIATION, scans
+                                    # without a single host) never got the button, so their corrections were lost.
+                                    target_display = (target_display if target_display != "unknown"
+                                                      else _set_text or "device-level")
+                                    publish_action_id = uuid.uuid4().hex[:10]
+                                    feedback_ttl = float(self.config.get("fp_operator_feedback_ttl_seconds", 30 * 86400.0))
+                                    self.state_manager.record_action(
+                                        action_id=publish_action_id, action_type="published_alert",
+                                        target=target_display, device_id=dev_id, hostname=hostname,
+                                        ttl_seconds=feedback_ttl,
+                                        # alert_event_id (2026-09-22): lets a later operator tap
+                                        # (immunize/revoke) record a real operator_actions row
+                                        # against the SAME alert_event this ledger entry is about,
+                                        # instead of having zero durable link between the two.
+                                        # None whenever this cycle's graph write didn't happen --
+                                        # the Telegram action itself is entirely unaffected either way.
+                                        extra={"alert_payload": alert_payload, "alert_event_id": alert_event_id},
+                                    )
+                                    inline_keyboard.append([
+                                        {"text": "🛡️ Mark False Positive", "callback_data": f"immunize:{publish_action_id}"}
+                                    ])
 
                                     if inline_keyboard:
                                         reply_markup = {"inline_keyboard": inline_keyboard}
@@ -4309,6 +4071,21 @@ class EnginePipeline:
                 rotate_subprocess_log_if_oversized(self.state_dir / _log_name)
             self._last_prune = now
 
+        # Containment T1: a contained device the tarpit does not reach (its frames seen going to the real gateway after
+        # the grace period) is reported -- the operator must not believe it is cut off (CONTAINMENT_MODEL.md section 5).
+        if self.ips_mitigator is not None and hasattr(self.ips_mitigator, "pop_containment_events"):
+            for _ev in self.ips_mitigator.pop_containment_events():
+                if _ev.get("type") == "tarpit_not_reaching":
+                    _name = _ev.get("hostname") or _ev.get("dev_id") or "a device"
+                    LOGGER.warning("Containment not reaching %s (%s): its traffic still goes to the real gateway.",
+                                   _name, _ev.get("dev_id"))
+                    if self.alert_manager is not None:
+                        self.alert_manager.send(
+                            f"⚠️ *Tarpit not reaching {_name}*\n"
+                            f"Its traffic is still going out through your router: the tarpit does not cut it off "
+                            f"(for example a Wi-Fi device your router answers for). Use *Block internet* for it, or "
+                            f"release it.")
+
         # IPC Split-Brain Reconciliation: detect if the Uvicorn IPC endpoints wrote
         # a sentinel file after modifying state from the separate process. If so, pull
         # the updated IPS state (tarpit_targets, router_isolated_devices, blocked_domains) back into live memory
@@ -4321,11 +4098,8 @@ class EnginePipeline:
                 self.state_manager.reconcile_ips_from_disk()
                 if self.ips_mitigator:
                     # Sync the live IPSMitigator's in-memory tarpit/router dicts from the reconciled state
-                    ips_state = self.state_manager.get_ips_state()
-                    with self.ips_mitigator._lock:
-                        self.ips_mitigator._tarpit_active_targets = ips_state.get("tarpit_targets", {})
-                        self.ips_mitigator._router_isolated_devices = ips_state.get("router_isolated_devices", {})
-                        self.ips_mitigator._operator_released_devices = ips_state.get("operator_released_devices", {})
+                    # re-keyed by device (containment T1, IPSMitigator.reload_ips_state)
+                    self.ips_mitigator.reload_ips_state(self.state_manager.get_ips_state())
                     LOGGER.info("✅ [IPC SYNC] IPSMitigator in-memory state reconciled after Telegram release.")
             except Exception as _ipc_exc:
                 LOGGER.warning("IPC sentinel reconciliation failed: %s", _ipc_exc)

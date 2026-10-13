@@ -400,7 +400,12 @@ notify_proposal = notify_engine.autotune.propose_change(
 )
 from argus.autotune.engine import _DEFAULT_CANARY_SECONDS as _CANARY_SECONDS  # noqa: E402
 promote_now = NOW + 2 + _CANARY_SECONDS + 1  # past the canary window
-promoted_ok = notify_engine.autotune.promote_change(notify_proposal.change_id, "bt_hazard_notify", now=promote_now)
+# a later nightly backtest (it ran the golden set) confirms -- never the proposal's own run (2026-10-13)
+store._conn.execute(
+    "INSERT INTO backtest_runs (run_id, started_at, finished_at, overall_pass, golden_set_result_json) "
+    "VALUES ('bt_hazard_confirm', ?, ?, 1, '{\"passed\": true}')", (promote_now - 1, promote_now - 1))
+store._maybe_commit()
+promoted_ok = notify_engine.autotune.promote_change(notify_proposal.change_id, "bt_hazard_confirm", now=promote_now)
 check("Phase 5 setup: promote_change() itself actually succeeded (not silently "
       "rejected by its own canary/backtest gate)", promoted_ok is True)
 notify_new_hazard = store._conn.execute(

@@ -88,7 +88,7 @@ def test_list_devices_handles_missing_graph_db(tmp_path, monkeypatch, state_file
 def test_containment_for_reports_none_by_default(graph_db, state_file):
     ips_state = {"tarpit_targets": {}, "router_isolated_devices": {}, "blocked_domains": {}}
     c = devices_api._containment_for(ips_state, "192.168.1.50", "unknown", "dev_a")
-    assert c == {"tarpitted": False, "router_isolated": False, "blocked_domain_count": 0}
+    assert c == {"tarpitted": False, "router_isolated": False, "blocked_domain_count": 0, "tarpit_status": ""}
 
 
 def test_containment_for_reports_active_containment(graph_db, state_file):
@@ -101,7 +101,8 @@ def test_containment_for_reports_active_containment(graph_db, state_file):
         },
     }
     c = devices_api._containment_for(ips_state, "192.168.1.50", "aa:bb", "dev_a")
-    assert c == {"tarpitted": True, "router_isolated": True, "blocked_domain_count": 2}
+    # containment T1: by device id / MAC; tarpit_status is the observed state ("requested" until the engine acts)
+    assert c == {"tarpitted": True, "router_isolated": True, "blocked_domain_count": 2, "tarpit_status": "requested"}
 
 
 def test_list_devices_includes_containment_field(graph_db, state_file):

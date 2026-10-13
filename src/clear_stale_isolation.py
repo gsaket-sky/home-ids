@@ -35,7 +35,7 @@ from core.state_guard import StateManager
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python3 src/clear_stale_isolation.py <IP_OR_MAC_OR_HOSTNAME_OR_DEV_ID>")
+        print("Usage: python3 src/clear_stale_isolation.py <DEV_ID_OR_MAC_OR_REGISTERED_IP>")
         sys.exit(1)
 
     identifier = sys.argv[1].strip()
@@ -50,13 +50,17 @@ def main():
 
     cleared = []
 
-    for ip, meta in list(tarpit.items()):
-        if identifier in (ip, meta.get("mac"), meta.get("hostname"), meta.get("dev_id")):
-            del tarpit[ip]
-            cleared.append(f"tarpit_targets[{ip}] ({meta.get('hostname', 'unknown')})")
+    # Entries are keyed by device ("dev:<id>", containment T1) and act on the device's MACs; matched by key, device id,
+    # one of its MACs or the address it was registered under -- not by a name (names are shared).
+    from mitigation import containment as _ct
+    low = identifier.lower()
+    for key, meta in list(tarpit.items()):
+        if identifier in (key, meta.get("dev_id"), meta.get("registered_ip")) or low in _ct.entry_macs(meta):
+            del tarpit[key]
+            cleared.append(f"tarpit_targets[{key}] ({meta.get('hostname', 'unknown')})")
 
     for mac, meta in list(router.items()):
-        if identifier in (mac, meta.get("ip"), meta.get("hostname"), meta.get("dev_id")):
+        if identifier in (mac, meta.get("ip"), meta.get("dev_id")) or low == _ct.norm_mac(mac):
             del router[mac]
             cleared.append(f"router_isolated_devices[{mac}] ({meta.get('hostname', 'unknown')})")
 

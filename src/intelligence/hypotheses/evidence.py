@@ -1,6 +1,6 @@
 import threading
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 import time
 
 from utils import ZEEK_NOTICE_ATTACK_SHAPED_EVIDENCE_TYPES
@@ -18,7 +18,12 @@ class Evidence:
     independence_group: str = "general" # e.g., "dns_behavior", "reputation" -- see EVIDENCE_FAMILIES below
     provenance: str = ""    # e.g., "detector:dns_entropy"
     domain: Optional[str] = None
-    
+    # Scan-shaped evidence (arp_sweep, zeek_conn_abuse, zeek_lateral_scan) touches a SET of hosts: `domain` holds one
+    # example for older readers, `targets` a short sorted sample and `target_count` the distinct count, so the alert
+    # can name the set instead of one arbitrary member (core/alert_attribution.py).
+    targets: Tuple[str, ...] = ()
+    target_count: int = 0
+
     def effective_weight(self) -> float:
         return self.confidence * self.freshness
 

@@ -96,6 +96,33 @@ _TUNE_TIGHTEN_FLOOR = 0.70   # any class below this proposes tightening
 _TUNE_LOOSEN_CEILING = 1.0   # every class's RAW detection rate must be at 100% to even consider loosening
 _TUNE_DEFAULT_SENSITIVITY = 0.9  # matches decision/engine.py's own hardcoded default
 
+# Which evidence each tuned parameter gates (Section I open point (b), 2026-10-13): a synthetic class can only say
+# something about a parameter its own evidence passes through. hard_stop_candidate_sensitivity is read in exactly one
+# place -- the "confirmed_exploit" hard stop over suricata_signature_match evidence (argus/decision/engine.py) -- yet the
+# rule moved it on the worst synthetic class, none of which carries Suricata evidence.
+_PARAMETER_EVIDENCE_TYPES = {_TUNE_PARAMETER: frozenset({"suricata_signature_match"})}
+
+
+def _classes_affected_by(parameter: str) -> set:
+    """The synthetic attack classes whose generated evidence passes through `parameter` -- derived from the
+    generators themselves (argus/synthetic/attacks.py), never a hand-kept class list."""
+    from argus.synthetic.attacks import ATTACK_GENERATORS
+    wanted = _PARAMETER_EVIDENCE_TYPES.get(parameter, frozenset())
+    out = set()
+    for name, gen in ATTACK_GENERATORS.items():
+        try:
+            types = {e.evidence_type for e in gen("probe-device")}
+        except Exception:
+            continue
+        if types & wanted:
+            out.add(name)
+    return out
+
+
+def _restrict_to_parameter(class_hits_totals: Dict[str, "tuple[int, int]"], parameter: str) -> Dict[str, "tuple[int, int]"]:
+    affected = _classes_affected_by(parameter)
+    return {cls: v for cls, v in class_hits_totals.items() if cls in affected}
+
 # 2026-09-16, per-device/category autotuning (Documentation/
 # PER_DEVICE_CATEGORY_AUTOTUNE_PLAN.md §3b): the safe-threshold gate this plan's
 # user request explicitly asked for -- closes a real gap that existed even for
@@ -307,9 +334,10 @@ def _propose_tuning_change(store: GraphStore, synthetic: Dict[str, Any], drift: 
         for cls, r in device_result.get("attack_results", {}).items():
             if isinstance(r, dict) and "detected" in r:
                 by_class.setdefault(cls, []).append(bool(r["detected"]))
-    class_hits_totals = {cls: (sum(hits), len(hits)) for cls, hits in by_class.items() if hits}
+    class_hits_totals = _restrict_to_parameter(
+        {cls: (sum(hits), len(hits)) for cls, hits in by_class.items() if hits}, _TUNE_PARAMETER)
     if not class_hits_totals:
-        return None
+        return None      # no class says anything about this parameter
 
     engine = AutotuneEngine(store)
     bounds = TUNABLE_PARAMETERS[_TUNE_PARAMETER]
@@ -358,7 +386,9 @@ def _propose_scoped_tuning_changes(store: GraphStore, all_trials: List[Dict[str,
         if entry["device_type"]:
             by_category.setdefault(entry["device_type"], []).append(entry)
     for category, entries in by_category.items():
-        class_hits_totals = _hits_and_totals_by_class(entries)
+        class_hits_totals = _restrict_to_parameter(_hits_and_totals_by_class(entries), _TUNE_PARAMETER)
+        if not class_hits_totals:
+            continue
         current = engine.get_active_value(_TUNE_PARAMETER, device_type=category, default=_TUNE_DEFAULT_SENSITIVITY)
         decision = _decide_scoped_change(
             current, bounds, direction, class_hits_totals,
@@ -380,7 +410,9 @@ def _propose_scoped_tuning_changes(store: GraphStore, all_trials: List[Dict[str,
         by_device.setdefault(entry["device_id"], []).append(entry)
     for device_id, entries in by_device.items():
         device_type = entries[0]["device_type"]
-        class_hits_totals = _hits_and_totals_by_class(entries)
+        class_hits_totals = _restrict_to_parameter(_hits_and_totals_by_class(entries), _TUNE_PARAMETER)
+        if not class_hits_totals:
+            continue
         current = engine.get_active_value(_TUNE_PARAMETER, device_id=device_id, device_type=device_type,
                                              default=_TUNE_DEFAULT_SENSITIVITY)
         decision = _decide_scoped_change(
@@ -707,7 +739,7 @@ def check_fp_combined_retroactive_misses_and_rollback(store: GraphStore, now: Op
             f"SELECT decision_id, device_id, timestamp, raw_payload_json FROM decisions "
             f"WHERE device_id IN ({placeholders}) AND timestamp >= ?",
             (*device_ids, since),
-        ).fetchall()
+        )   # streamed: one payload in memory at a time (scheduler OOM, 2026-10-13)
 
         near_misses = []
         for row in candidate_rows:
@@ -846,7 +878,7 @@ def check_reputation_floor_retroactive_misses_and_rollback(
             f"SELECT decision_id, device_id, timestamp, raw_payload_json FROM decisions "
             f"WHERE device_id IN ({placeholders}) AND timestamp >= ?",
             (*device_ids, since),
-        ).fetchall()
+        )   # streamed: one payload in memory at a time (scheduler OOM, 2026-10-13)
 
         near_misses = []
         for row in candidate_rows:
@@ -901,15 +933,17 @@ def check_reputation_floor_retroactive_misses_and_rollback(
     return rolled_back
 
 
-def _decision_rows(store: GraphStore, columns: str, device_id: str, condition: str, params: tuple) -> list:
+def _decision_rows(store: GraphStore, columns: str, device_id: str, condition: str, params: tuple):
     """`SELECT <columns> FROM decisions` for this device under every id it has had (2026-10-05 merge sweep: evidence
     recorded under an id merged away since must still find the decision that followed it under the device's current
-    id), plus `condition` (an AND ... clause over `params`)."""
+    id), plus `condition` (an AND ... clause over `params`). A cursor, iterated once by every caller: the rows (full
+    decision payloads, "every later decision" for some callers) are streamed, not held in memory together -- the
+    1 GB scheduler container was OOM-killed during the nightly backtest (2026-10-12)."""
     ids = store.device_ids_for(device_id)
     return store._conn.execute(
         f"SELECT {columns} FROM decisions WHERE device_id IN ({','.join('?' * len(ids))}) {condition}",
         (*ids, *params),
-    ).fetchall()
+    )
 
 
 def _with_merged_ids(store: GraphStore, device_ids: List[str]) -> List[str]:
@@ -946,7 +980,7 @@ def _reputation_recall_hits_totals(store: GraphStore, device_ids: List[str], par
         f"SELECT raw_payload_json FROM decisions WHERE device_id IN ({placeholders}) "
         f"AND timestamp >= ? AND raw_payload_json LIKE '%CONFIRMED_THREAT%'",
         [*device_ids, since],
-    ).fetchall()
+    )   # streamed: one payload in memory at a time (scheduler OOM, 2026-10-13)
     hits = 0
     n = 0
     for row in rows:
@@ -1128,7 +1162,7 @@ def _propose_bocpd_hazard_changes(store: GraphStore, drift: Dict[str, Any], run_
             f"SELECT device_id, timestamp, raw_payload_json FROM decisions WHERE device_id IN ({placeholders}) "
             f"AND timestamp >= ? AND raw_payload_json LIKE '%CONFIRMED_THREAT%'",
             [*device_ids, since],
-        ).fetchall()
+        )   # streamed: one payload in memory at a time (scheduler OOM, 2026-10-13)
         regime_rows = store._conn.execute(
             f"SELECT device_id, timestamp FROM evidence WHERE evidence_type='regime_change' "
             f"AND device_id IN ({placeholders}) AND timestamp >= ?",
@@ -1289,7 +1323,7 @@ def _propose_peer_deviation_changes(store: GraphStore, run_id: str, now: float) 
             f"SELECT device_id, timestamp, features_json FROM evidence WHERE evidence_type='peer_deviation' "
             f"AND device_id IN ({placeholders}) AND timestamp >= ?",
             (*device_ids, since),
-        ).fetchall()
+        )   # streamed: one payload in memory at a time (scheduler OOM, 2026-10-13)
         out = []
         for row in evidence_rows:
             try:
@@ -1436,7 +1470,7 @@ def _propose_familiarity_trust_bar_changes(store: GraphStore, run_id: str, now: 
         rows = store._conn.execute(
             f"SELECT raw_payload_json FROM decisions WHERE device_id IN ({placeholders}) AND timestamp >= ?",
             [*device_ids, since],
-        ).fetchall()
+        )   # streamed: one payload in memory at a time (scheduler OOM, 2026-10-13)
         corrected, confirmed = [], []
         for row in rows:
             try:

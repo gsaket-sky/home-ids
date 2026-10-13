@@ -446,6 +446,16 @@ class AutotuneEngine:
         if last_proposed is not None and (now - last_proposed) < _COOLDOWN_SECONDS:
             return ProposalResult(False, reason=f"cooldown active ({now - last_proposed:.0f}s < {_COOLDOWN_SECONDS:.0f}s)")
 
+        # One pending proposal per scope and value (2026-10-13: the same promotion row was written 7 times for one
+        # device): a proposal still in canary for this exact value is not proposed again.
+        dup = self.store._conn.execute(
+            "SELECT change_id FROM threshold_history WHERE parameter=? AND device_id IS ? AND device_type IS ? "
+            "AND promoted_at IS NULL AND rolled_back_at IS NULL AND ABS(new_value - ?) < 1e-9 LIMIT 1",
+            (parameter, row_device_id, row_device_type, float(new_value)),
+        ).fetchone()
+        if dup is not None:
+            return ProposalResult(False, reason=f"already pending as {dup['change_id']}")
+
         if backtest_run_id is None:
             return ProposalResult(False, reason="no backtest_run_id given -- a proposal cannot be made without one")
         backtest_row = self.store._conn.execute(
@@ -530,6 +540,45 @@ class AutotuneEngine:
         self.store._maybe_commit()
         return ProposalResult(True, change_id=change_id)
 
+    def real_backtest_verdict(self, run_id: Optional[str]) -> "tuple[bool, str]":
+        """(passes, why) for a confirming backtest run: a REAL nightly backtest (it ran the golden set -- rows a job
+        synthesizes to back a proposal with its own evidence carry an empty golden set and a "kind"), that passed and
+        flagged no drift. 2026-10-13: train_fp_classifier confirmed its own pending proposals with a row it inserted
+        itself (overall_pass=1), so ARP / fp-threshold changes bypassed the nightly backtest gate (Section I (a))."""
+        if not run_id:
+            return False, "no confirming backtest run"
+        row = self.store._conn.execute(
+            "SELECT overall_pass, golden_set_result_json, drift_result_json FROM backtest_runs WHERE run_id=?",
+            (run_id,),
+        ).fetchone()
+        if row is None:
+            return False, f"backtest run {run_id} not found"
+        try:
+            golden = json.loads(row["golden_set_result_json"] or "{}")
+        except (TypeError, ValueError):
+            golden = {}
+        if not golden:
+            return False, f"run {run_id} is not a nightly backtest (no golden set)"
+        if not row["overall_pass"]:
+            return False, f"backtest {run_id} failed"
+        try:
+            drift = json.loads(row["drift_result_json"] or "{}")
+        except (TypeError, ValueError):
+            drift = {}
+        if drift.get("drift_detected"):
+            return False, f"backtest {run_id} flagged drift"
+        return True, "ok"
+
+    def latest_real_backtest_run(self, started_after: float) -> Optional[str]:
+        """The newest nightly backtest run (golden set ran) started after `started_after`, passing or not -- the
+        caller asks real_backtest_verdict() whether it confirms anything."""
+        for row in self.store._conn.execute(
+                "SELECT run_id, golden_set_result_json FROM backtest_runs WHERE started_at > ? "
+                "ORDER BY started_at DESC LIMIT 20", (started_after,)):
+            if (row["golden_set_result_json"] or "{}").strip() not in ("", "{}"):
+                return row["run_id"]
+        return None
+
     def promote_change(self, change_id: str, confirming_backtest_run_id: str, now: Optional[float] = None) -> bool:
         """Promotes a proposed change once its canary window has elapsed AND
         a SUBSEQUENT backtest run (confirming the canary period didn't
@@ -545,10 +594,16 @@ class AutotuneEngine:
             return False
         if now < float(row["canary_until"] or 0):
             return False
-        backtest_row = self.store._conn.execute(
-            "SELECT overall_pass FROM backtest_runs WHERE run_id=?", (confirming_backtest_run_id,),
-        ).fetchone()
-        if backtest_row is None or not backtest_row["overall_pass"]:
+        # Only a real nightly backtest that ran AFTER the proposal, passed and flagged no drift confirms it.
+        ok, why = self.real_backtest_verdict(confirming_backtest_run_id)
+        if not ok:
+            LOGGER.info("Promotion of %s withheld: %s", change_id, why)
+            return False
+        started = self.store._conn.execute(
+            "SELECT started_at FROM backtest_runs WHERE run_id=?", (confirming_backtest_run_id,)).fetchone()
+        if started is None or float(started["started_at"] or 0) <= float(row["proposed_at"] or 0):
+            LOGGER.info("Promotion of %s withheld: backtest %s ran before the proposal", change_id,
+                        confirming_backtest_run_id)
             return False
         self.store._conn.execute(
             "UPDATE threshold_history SET promoted_at=? WHERE change_id=?", (now, change_id),

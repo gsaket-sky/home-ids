@@ -411,6 +411,7 @@ class HealthManager:
         # feed_health.py/job_health.json's own consumers already alert on
         self._evaluate_feed_health_components()
         self._evaluate_job_health_components(now)
+        self._evaluate_config_component(now)
 
         self._write_snapshot_file()
 
@@ -1201,12 +1202,57 @@ class HealthManager:
 
             interval_seconds = _estimate_cron_interval_seconds(cron_expr)
             staleness_hours = (interval_seconds * 2.0 / 3600.0) if interval_seconds else fallback_hours
-            if age_hours < staleness_hours:
+            # A job-specific bound wins (2026-10-12, M3 "alert if the backtest gate cannot run": the backtest gates
+            # every autotune promotion, so 36 h without a pass is already a problem, not 48 h).
+            max_age = (self.config.get("health_manager_job_max_age_hours") or {}).get(job_name)
+            if max_age:
+                staleness_hours = float(max_age)
+            last_failure = float(entry.get("last_failure", 0) or 0)
+            if last_failure > last_success:
+                # the LAST run failed: say so now, with its reason, instead of waiting for staleness (a nightly job
+                # killed every night looked healthy for two days)
+                self._apply_signal(component, DEGRADED,
+                                   f"last run failed {(now - last_failure) / 3600.0:.1f}h ago: "
+                                   f"{str(entry.get('error') or 'no reason recorded')[:200]}")
+            elif age_hours < staleness_hours:
                 self._apply_signal(component, HEALTHY, f"last success {age_hours:.1f}h ago")
             else:
                 self._apply_signal(component, DEGRADED, f"no success in {age_hours:.1f}h (expected within {staleness_hours:.1f}h)")
         if retired:
             self._drop_retired_jobs(path, retired)
+
+    _GATEWAY_RECHECK_SECONDS = 300.0
+
+    def _evaluate_config_component(self, now: float) -> None:
+        """Component "config": the settings that cannot work as written (config.validate_config), with what is wrong
+        -- re-checked every cycle, so a fix applies without a restart. Errors are DEGRADED (nothing to restart) and
+        alerted once per distinct set of problems (2026-10-13: a mistyped home network was silently dropped)."""
+        try:
+            from config import validate_config
+            if now - getattr(self, "_gateway_checked_at", 0.0) >= self._GATEWAY_RECHECK_SECONDS:
+                self._gateway_checked_at = now
+                try:
+                    from argus.identity.discovery import default_gateway_ip
+                    self._discovered_gateway = default_gateway_ip()
+                except Exception:
+                    self._discovered_gateway = None
+            problems = validate_config(self.config, getattr(self, "_discovered_gateway", None))
+        except Exception as exc:
+            LOGGER.debug("Config validation failed to run: %s", exc)
+            return
+        if not problems:
+            self._apply_signal("config", HEALTHY, "every setting checked is usable")
+            self._config_problems_alerted = None
+            return
+        detail = "; ".join(f"{key}: {msg}" for _sev, key, msg in problems)
+        self._apply_signal("config", DEGRADED, detail[:600])
+        key = tuple(sorted((k, m) for _s, k, m in problems))
+        if key != getattr(self, "_config_problems_alerted", None):
+            self._config_problems_alerted = key
+            for sev, k, msg in problems:
+                (LOGGER.error if sev == "error" else LOGGER.warning)("Configuration %s: %s", k, msg)
+            self._alert("⚠️ *Settings that cannot work as written*\n" + "\n".join(
+                f"- `{k}`: {m}" for _s, k, m in problems[:8]))
 
     def _drop_retired_jobs(self, path: Path, names: list) -> None:
         try:

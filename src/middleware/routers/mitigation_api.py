@@ -89,14 +89,16 @@ def get_mitigation_state(token: str = Depends(verify_token)):
     blocked_domains = ips_state.get("blocked_domains", {})
 
     contained_by_dev: Dict[str, Dict[str, Any]] = {}
-    for ip, meta in tarpit.items():
+    for _key, meta in tarpit.items():          # keyed by device ("dev:<id>"), containment T1
         dev_id = meta.get("dev_id", "unknown")
-        contained_by_dev.setdefault(dev_id, {
+        entry = contained_by_dev.setdefault(dev_id, {
             "device_id": dev_id, "hostname": meta.get("hostname", "unknown"),
-            "ip": ip, "mac": meta.get("mac", "unknown"),
+            "ip": meta.get("registered_ip", "unknown"), "mac": meta.get("mac", "unknown"),
             "tarpitted": False, "router_isolated": False,
-        })["tarpitted"] = True
-        contained_by_dev[dev_id]["ip"] = ip
+        })
+        entry["tarpitted"] = True
+        entry["macs"] = meta.get("macs") or [meta.get("mac", "unknown")]
+        entry["tarpit_status"] = meta.get("status", "")
     for mac, meta in router_isolated.items():
         dev_id = meta.get("dev_id", "unknown")
         entry = contained_by_dev.setdefault(dev_id, {

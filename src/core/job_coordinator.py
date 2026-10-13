@@ -169,6 +169,22 @@ def _read_slot(state_dir) -> Optional[dict]:
     return _promote_or_clear(path, slot)
 
 
+def dead_occupant(state_dir) -> Optional[dict]:
+    """The slot's occupant when its process no longer exists, read WITHOUT clearing it (_read_slot() clears it as it
+    reads). A job that died together with the scheduler or its container (e.g. out of memory) left no exit for anyone
+    to see; the scheduler records it at its next start before the slot self-heals (2026-10-12)."""
+    path = _lock_path(state_dir)
+    if not path.exists():
+        return None
+    try:
+        slot = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not slot or not slot.get("pid") or is_pid_alive(slot.get("pid")):
+        return None
+    return slot
+
+
 def peek_admission(state_dir, priority: int) -> bool:
     """Read-only, non-claiming preview of whether acquire_or_preempt() would
     plausibly succeed for a job of this priority right now -- lets a caller avoid

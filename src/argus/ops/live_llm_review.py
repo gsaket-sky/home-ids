@@ -158,6 +158,19 @@ _COORDINATED_TARGETING_WINDOW_SECONDS = RollingWindowView.SHORT_WINDOW_SECONDS
 _COORDINATED_TARGETING_MIN_OTHER_DEVICES = 2  # "3+ distinct devices" total = 2+ OTHER devices
 
 
+_STATE_RANK = {"CRITICAL": 0, "HIGH": 1, "SUSPICIOUS": 2}
+
+
+def review_priority(decision: Dict[str, Any]) -> tuple:
+    """Sort key: severity, then more independent evidence sources first, then oldest first."""
+    payload = decision.get("raw_payload") or {}
+    try:
+        sources = int(payload.get("independent_sources") or 0)
+    except (TypeError, ValueError):
+        sources = 0
+    return (_STATE_RANK.get(decision.get("state"), 9), -sources, float(decision.get("timestamp") or 0.0))
+
+
 def _load_already_reviewed(output_path: Path) -> Set[str]:
     """The output file IS the cache -- every decision_id that already has a line in
     it has already been reviewed, so no separate cache file/dict is needed. Fails
@@ -479,12 +492,13 @@ def main() -> None:
         already_reviewed = _load_already_reviewed(output_path)
         persistent_cache = _load_persistent_cache(output_path, now)
         candidates = [
-            d for d in store.get_decisions_since(now - LOOKBACK_SECONDS)
-            if d["state"] in _REVIEWABLE_STATES and d["decision_id"] not in already_reviewed
+            d for d in store.get_decisions_since(now - LOOKBACK_SECONDS, states=_REVIEWABLE_STATES)
+            if d["decision_id"] not in already_reviewed
         ]
-        # Oldest first -- review the longest-waiting decisions before newer ones,
-        # matching a simple FIFO fairness policy across runs when the cap is hit.
-        candidates.sort(key=lambda d: d["timestamp"])
+        # A run reviews only a handful (query and time budget), so the order decides what gets reviewed at all
+        # (2026-10-12 on .94: 160 candidates, ~6 reviewed, oldest first). Most severe first, then the ones with more
+        # independent evidence sources (a single-source SUSPICIOUS last), then the longest waiting.
+        candidates.sort(key=review_priority)
 
         reviewed = 0
         errors = 0

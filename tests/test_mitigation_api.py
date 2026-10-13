@@ -90,7 +90,7 @@ def test_tarpit_device_success(state_file):
     sm = StateManager(state_path=str(state_file))
     sm.load_from_disk()
     targets = sm.get_ips_state()["tarpit_targets"]
-    assert targets["192.168.1.50"]["dev_id"] == "dev_a" and targets["192.168.1.50"]["mac"] == "aa:bb:cc:dd:ee:ff"
+    assert targets["dev:dev_a"]["dev_id"] == "dev_a" and targets["dev:dev_a"]["macs"] == ["aa:bb:cc:dd:ee:ff"]
     assert (state_file.parent / ".ipc_sync_signal").exists()          # the engine is told to pick it up
 
 

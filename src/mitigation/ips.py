@@ -18,6 +18,7 @@ RECENT FIXES:
 
 import json
 import logging
+import collections
 import threading
 import time
 import requests
@@ -76,11 +77,19 @@ def _remove_gauge_labels(gauge, *labels) -> None:
 # out of sync with what this file actually held back -- see that call site's comment.
 CRITICAL_DEVICE_TYPES = frozenset({"router", "gateway", "nas", "smart_tv"})
 
+
+def _discover_gateway_ipv4():
+    """This network's IPv4 default gateway, from the kernel's routing table (argus/identity/discovery.py) -- read only;
+    a module-level name so tests can replace it."""
+    from argus.identity.discovery import default_gateway_ip
+    return default_gateway_ip()
+
 # Layer-2 tarpit primitives are our own stdlib raw-socket code (mitigation/l2_raw.py), replacing scapy (GPL-2.0).
 # Linux-only, like the tarpit always was: AF_PACKET must exist. (Still needs root/CAP_NET_RAW at runtime.)
 import ipaddress
 import socket as _socket_mod
 from mitigation import l2_raw
+from mitigation import containment as _ct
 from mitigation import pihole_auth
 L2_AVAILABLE = hasattr(_socket_mod, "AF_PACKET")
 # Key in the shared IPS state: {"armed": bool, "updated_at": epoch} as the engine's own IPSMitigator found it at start.
@@ -168,9 +177,17 @@ class IPSMitigator:
         ips_state = self.state_manager.get_ips_state()
         self._retry_queue = ips_state.get("retry_queue", {})
         self._dead_letter = ips_state.get("dead_letter", {})
-        self._tarpit_active_targets = ips_state.get("tarpit_targets", {})
+        # T1 (2026-10-12): tarpit entries are keyed by DEVICE ("dev:<id>") and carry every MAC the device is known by;
+        # entries persisted under an address are re-keyed here (mitigation/containment.py).
+        raw_targets = ips_state.get("tarpit_targets", {}) or {}
+        self._tarpit_active_targets = _ct.normalize_tarpit_targets(raw_targets)
         self._router_isolated_devices = ips_state.get("router_isolated_devices", {})
         self._operator_released_devices = ips_state.get("operator_released_devices", {})
+        # Per-MAC observations of contained devices' frames (observer thread) and the events the engine alerts on.
+        self._observed: Dict[str, Dict[str, float]] = {}
+        self._observed_lock = threading.Lock()
+        self._containment_events = collections.deque(maxlen=100)
+        self._targets_refreshed_at = 0.0
         
         self._state_only = not start_workers
         if not start_workers:
@@ -185,6 +202,11 @@ class IPSMitigator:
 
         self._init_arp_tarpit()
         self._publish_engine_tarpit_state()
+        if self._tarpit_active_targets != raw_targets:
+            with self._lock:
+                self._save_queues()
+            LOGGER.info("Tarpit entries re-keyed by device (%d entr%s).", len(self._tarpit_active_targets),
+                        "y" if len(self._tarpit_active_targets) == 1 else "ies")
         self._sync_metrics_from_state()
 
         interactive_mode = bool(self.config.get("interactive_blocking_enabled", False))
@@ -267,26 +289,111 @@ class IPSMitigator:
         found = cls._arp_target_ip(ip, mac, ipv4_candidates)
         return found if cls._is_arp_ipv4(found) else None
 
-    def _free_address_key(self, ip: str, mac: str) -> None:
-        """Caller holds self._lock. Tarpit entries are keyed by address, and an address can change hands (DHCP reuse;
-        identity hand-over, 2026-10-12). When the entry under `ip` belongs to another MAC than `mac`, it is the
-        contained device's, not the new holder's: it is re-keyed by its MAC ("mac:<mac>" -- not an address, so the ARP
-        loop resolves the device's current IPv4 by MAC and the NDP loop matches its MAC as always), so the contained
-        device stays contained and the new holder can get its own entry. Before, the registration answered "Already
-        tarpitted" for the wrong device, and _ensure_tarpit_target() overwrote the entry's MAC -- releasing the contained
-        device and cutting off the one that inherited its address."""
-        cur = self._tarpit_active_targets.get(ip)
-        cur_mac = str((cur or {}).get("mac") or "unknown").lower()
-        new_mac = str(mac or "unknown").lower()
-        if not cur or cur_mac == "unknown" or new_mac == "unknown" or cur_mac == new_mac:
-            return
-        entry = self._tarpit_active_targets.pop(ip)
-        if entry.get("arp_ip") == ip:
-            entry.pop("arp_ip", None)          # that address is the new holder's now
-        self._tarpit_active_targets[f"mac:{cur_mac}"] = entry
-        self._save_queues()
-        LOGGER.warning("Tarpit entry for %s re-keyed to mac:%s -- the address now belongs to another device (MAC %s); "
-                       "the contained device stays contained by its MAC.", ip, cur_mac, new_mac)
+    # ------------------------------------------------------------------------------------------ per-device registry
+    def _device_macs(self, dev_id: str, fallback_mac: Optional[str] = None) -> List[str]:
+        """Every MAC the device is known by now (StateManager.macs_of: its MAC and every MAC the MAC index binds to
+        it), lower case; the caller's MAC only when the state knows none (a device not in this process's state yet)."""
+        macs: List[str] = []
+        macs_of = getattr(self.state_manager, "macs_of", None)
+        if macs_of is not None and _ct._usable(dev_id):
+            try:
+                macs = sorted({_ct.norm_mac(m) for m in macs_of(dev_id) if _ct._usable(m)})
+            except Exception as exc:
+                LOGGER.debug("macs_of(%s) failed: %s", dev_id, exc)
+        fallback = _ct.norm_mac(fallback_mac)
+        if not macs and _ct._usable(fallback):
+            macs = [fallback]
+        return macs
+
+    def _ipv4_hint(self, ip: Optional[str], mac: str, ipv4_candidates=()) -> Optional[str]:
+        """The IPv4 the ARP half uses for `mac` when the kernel's neighbour table has none: `ip` when it is IPv4, else
+        the newest IPv4 among the device's known addresses (see _arp_target_ip)."""
+        if self._is_arp_ipv4(ip):
+            return ip
+        return self._arp_ip_hint(ip or "", mac, ipv4_candidates)
+
+    def _register_tarpit(self, dev_id: str, mac: Optional[str], hostname: str, reason: str,
+                         ip: Optional[str] = None, ipv4_candidates=(),
+                         alert_ref: Optional[dict] = None) -> "tuple[bool, Optional[str]]":
+        """Creates or refreshes the device's tarpit entry ("dev:<id>"). Returns (created, key); (False, None) when the
+        device has no id or no known MAC (the tarpit acts on MACs). Refreshing sets the MACs to what the device is
+        known by now -- never another device's: an address that changed hands never moves containment."""
+        macs = self._device_macs(dev_id, mac)
+        if not _ct._usable(dev_id) or not macs:
+            return False, None
+        key = _ct.tarpit_key(dev_id)
+        hint = self._ipv4_hint(ip, _ct.norm_mac(mac) or macs[0], ipv4_candidates)
+        hint_mac = _ct.norm_mac(mac) if _ct.norm_mac(mac) in macs else macs[0]
+        with self._lock:
+            # an entry of this device still under an older key (another process wrote it) is the same entry
+            self._tarpit_active_targets = _ct.normalize_tarpit_targets(self._tarpit_active_targets)
+            cur = self._tarpit_active_targets.get(key)
+            if cur is not None:
+                cur["macs"], cur["mac"] = macs, macs[0]
+                cur["hostname"] = hostname if _ct._usable(hostname) else cur.get("hostname", "unknown")
+                if hint:
+                    cur.setdefault("arp_ips", {})[hint_mac] = hint
+                self._save_queues()
+                return False, key
+            graph_action_id = self._mirror_containment(dev_id, action_type="tarpit", status="active",
+                                                       target=",".join(macs), reason=reason)
+            entry = {"dev_id": dev_id, "hostname": hostname, "macs": macs, "mac": macs[0], "since": time.time(),
+                     "status": _ct.REQUESTED, "_graph_action_id": graph_action_id}
+            if _ct._usable(ip):
+                entry["registered_ip"] = ip
+            if hint:
+                entry["arp_ips"] = {hint_mac: hint}
+            if alert_ref:
+                entry["alert"] = dict(alert_ref)          # what caused it (None for an operator's own action)
+            self._tarpit_active_targets[key] = entry
+            self._save_queues()
+        try:
+            ips_tarpit_active.labels(device=dev_id, hostname=hostname, mac=macs[0]).set(1.0)
+            ips_tarpit_activations_total.labels(device=dev_id, hostname=hostname, mac=macs[0]).inc()
+        except Exception:
+            pass
+        return True, key
+
+    def _pop_tarpit_entries(self, keys) -> List[dict]:
+        """Caller holds self._lock. Removes the entries and their gauges; returns their metas."""
+        out = []
+        for key in keys:
+            meta = self._tarpit_active_targets.pop(key, None)
+            if meta is None:
+                continue
+            out.append(meta)
+            try:
+                ips_tarpit_active.labels(meta.get("dev_id", ""), meta.get("hostname", ""), meta.get("mac", "")).set(0.0)
+                ips_tarpit_active.remove(meta.get("dev_id", ""), meta.get("hostname", ""), meta.get("mac", ""))
+            except Exception:
+                pass
+        if out:
+            self._save_queues()
+        return out
+
+    def _tarpit_keys_for(self, dev_ids=(), macs=()) -> List[str]:
+        """Caller holds self._lock. Keys of the tarpit entries of these devices (by id) or holding one of these MACs."""
+        dev_ids = {d for d in dev_ids if _ct._usable(d)}
+        macs = {_ct.norm_mac(m) for m in macs if _ct._usable(m)}
+        return [k for k, m in self._tarpit_active_targets.items()
+                if isinstance(m, dict) and (m.get("dev_id") in dev_ids or macs & set(_ct.entry_macs(m)))]
+
+    def reload_ips_state(self, ips_state: Dict[str, Any]) -> None:
+        """The engine re-reads containment written by another process (web UI / console / Telegram), re-keyed by
+        device. Replaces pipeline.py's direct assignment of the raw dicts."""
+        with self._lock:
+            self._tarpit_active_targets = _ct.normalize_tarpit_targets(ips_state.get("tarpit_targets", {}) or {})
+            self._router_isolated_devices = ips_state.get("router_isolated_devices", {})
+            self._operator_released_devices = ips_state.get("operator_released_devices", {})
+            if self._tarpit_active_targets != (ips_state.get("tarpit_targets", {}) or {}):
+                self._save_queues()
+
+    def pop_containment_events(self) -> List[dict]:
+        """Containment events for the engine to alert on (a contained device the tarpit does not reach)."""
+        out = []
+        while self._containment_events:
+            out.append(self._containment_events.popleft())
+        return out
 
     def _publish_engine_tarpit_state(self) -> None:
         """The engine's instance records whether its tarpit is armed in the shared IPS state, for state-only instances
@@ -346,6 +453,11 @@ class IPSMitigator:
             
             self._ndp_tarpit_thread = threading.Thread(target=self._ndp_tarpit_loop, daemon=True, name="ndp_tarpit_worker")
             self._ndp_tarpit_thread.start()
+
+            # T1: what the contained devices' frames show (holding / not reaching / ...), see _observer_loop
+            self._observer_thread = threading.Thread(target=self._observer_loop, daemon=True,
+                                                     name="containment_observer")
+            self._observer_thread.start()
             
         except Exception as exc:
             LOGGER.error("⚠️ Dual-Stack Tarpit bypassing. Lacks raw socket privileges: %s", exc)
@@ -369,7 +481,7 @@ class IPSMitigator:
                 if not ns:
                     continue
                 with self._lock:
-                    is_trapped = any(meta.get("mac", "").lower() == ns["eth_src"]
+                    is_trapped = any(ns["eth_src"].lower() in _ct.entry_macs(meta)
                                      for meta in self._tarpit_active_targets.values())
                 if not is_trapped:
                     continue
@@ -386,7 +498,7 @@ class IPSMitigator:
         """Synchronizes in-memory IPS targets with disk state modified by external processes."""
         with self._lock:
             ips_state = self.state_manager.get_ips_state()
-            disk_tarpits = ips_state.get("tarpit_targets", {})
+            disk_tarpits = _ct.normalize_tarpit_targets(ips_state.get("tarpit_targets", {}) or {})
             disk_router = ips_state.get("router_isolated_devices", {})
             disk_released = ips_state.get("operator_released_devices", {})
             
@@ -591,31 +703,11 @@ class IPSMitigator:
         return cleared
 
     def _ensure_tarpit_target(self, client_ip: str, mac_addr: str, hostname: str, dev_id: str) -> None:
-        """Create or refresh a tarpit target using the latest MAC if it becomes known later."""
-        if not client_ip or client_ip == "unknown":
-            return
-
-        with self._lock:
-            self._free_address_key(client_ip, mac_addr)
-            target = self._tarpit_active_targets.get(client_ip)
-            if target is None:
-                self._tarpit_active_targets[client_ip] = {"mac": mac_addr or "unknown", "hostname": hostname, "dev_id": dev_id}
-                ips_tarpit_active.labels(device=dev_id, hostname=hostname, mac=mac_addr or "unknown").set(1.0)
-                LOGGER.info("🛡️ Registered tarpit target for %s using MAC %s", client_ip, mac_addr or "unknown")
-            else:
-                if mac_addr and mac_addr != "unknown" and target.get("mac") != mac_addr:
-                    target["mac"] = mac_addr
-                    target["hostname"] = hostname
-                    target["dev_id"] = dev_id
-                    ips_tarpit_active.labels(device=dev_id, hostname=hostname, mac=mac_addr).set(1.0)
-                    LOGGER.info("🛡️ Updated tarpit target %s with latest MAC %s", client_ip, mac_addr)
-                else:
-                    target["hostname"] = hostname or target.get("hostname", "unknown")
-                    target["dev_id"] = dev_id or target.get("dev_id", dev_id)
-            self._save_queues()
+        """Refresh the device's tarpit entry (its current MACs and IPv4 hint)."""
+        self._register_tarpit(dev_id, mac_addr, hostname, reason="refresh", ip=client_ip)
 
     def _arm_tarpit_for_dual_stack_coverage(self, client_ip: str, mac_addr: str, hostname: str,
-                                              dev_id: str, reason: str) -> bool:
+                                              dev_id: str, reason: str, alert_ref: Optional[dict] = None) -> bool:
         """Registers `client_ip` as a Layer-2 ARP/NDP tarpit target as a side effect of a
         SEPARATE containment decision (router isolation) that already decided this device
         is severe enough to cut off -- not gated on the tarpit mechanism's own,
@@ -660,31 +752,18 @@ class IPSMitigator:
             return False
         if not (L2_AVAILABLE or bool(self.config.get("simulation_mode", False))):
             return False
-        if not client_ip or client_ip == "unknown" or not mac_addr or mac_addr == "unknown":
+        created, _key = self._register_tarpit(dev_id, mac_addr, hostname, reason=reason, ip=client_ip,
+                                              alert_ref=alert_ref)
+        if not created:
             return False
-        with self._lock:
-            self._free_address_key(client_ip, mac_addr)
-            if client_ip in self._tarpit_active_targets:
-                return False
-            graph_action_id = self._mirror_containment(
-                dev_id, action_type="tarpit", status="active", target=client_ip, reason=reason)
-            self._tarpit_active_targets[client_ip] = {
-                "mac": mac_addr, "hostname": hostname, "dev_id": dev_id,
-                "_graph_action_id": graph_action_id,
-            }
-            self._save_queues()
-        try:
-            ips_tarpit_active.labels(device=dev_id, hostname=hostname, mac=mac_addr).set(1.0)
-            ips_tarpit_activations_total.labels(device=dev_id, hostname=hostname, mac=mac_addr).inc()
-        except Exception:
-            pass
         LOGGER.critical(
             "⚠️ [DUAL-STACK COVERAGE] Layer-2 tarpit also armed for %s (%s) alongside router "
             "isolation -- covers this device's IPv6 path, which the router-level block alone cannot.",
             hostname, client_ip)
         return True
 
-    def get_containment_status(self, client_ip: str, mac_addr: str = "unknown", domain: str = "", dev_id: str = "") -> str:
+    def get_containment_status(self, client_ip: str, mac_addr: str = "unknown", domain: str = "", dev_id: str = "",
+                               incident_id: Optional[str] = None) -> str:
         """Returns readable Telegram containment badge (TARPITTED, ROUTER ISOLATED, both
         together, DOMAIN BLOCKED, or UNBLOCKED).
 
@@ -708,27 +787,31 @@ class IPSMitigator:
         same class of accuracy bug this session's earlier WHY-block fix closed for
         evidence text. Checks both independently now and joins whichever are true, instead
         of returning on the first match."""
+        macs = self._device_macs(dev_id, mac_addr)
         with self._lock:
-            is_tarpitted = client_ip in self._tarpit_active_targets or (
-                dev_id and dev_id != "unknown"
-                and any(target.get("dev_id") == dev_id for target in self._tarpit_active_targets.values())
-            )
-            is_router_isolated = (mac_addr and mac_addr != "unknown" and mac_addr in self._router_isolated_devices) or (
-                dev_id and dev_id != "unknown"
-                and any(target.get("dev_id") == dev_id for target in self._router_isolated_devices.values())
-            )
+            view = {"tarpit_targets": self._tarpit_active_targets,
+                    "router_isolated_devices": self._router_isolated_devices}
+            # by device id or one of its MACs -- never by address (the next holder of an address is another device)
+            is_tarpitted = _ct.tarpitted(view, dev_id, macs) is not None
+            is_router_isolated = _ct.router_isolated(view, dev_id, macs) is not None
             if is_tarpitted and is_router_isolated:
-                return "🔒 ROUTER ISOLATED (Fritz!Box WAN) + TARPITTED (Layer-2 ARP/NDP, IPv6 coverage)"
+                return "🔒 ROUTER ISOLATED (router internet block) + TARPITTED (Layer-2 ARP/NDP, IPv6 coverage)"
             if is_tarpitted:
                 return "🔒 TARPITTED (Layer-2 ARP/NDP)"
             if is_router_isolated:
-                return "🔒 ROUTER ISOLATED (Fritz!Box WAN)"
+                return "🔒 ROUTER ISOLATED (router internet block)"
         # C5 FIX: _blocked_domains was never an attribute on IPSMitigator;
         # blocked domains live in state_manager IPS state.
         if domain and domain not in ("unknown", ""):
             ips_state = self.state_manager.get_ips_state()
-            if domain in ips_state.get("blocked_domains", {}):
-                return "🔒 DOMAIN BLOCKED (Pi-hole DNS)"
+            meta = ips_state.get("blocked_domains", {}).get(domain)
+            if meta is not None:
+                # "Blocked" only when THIS alert's incident caused the block (2026-10-12): the domain being on the
+                # list since an earlier, unrelated alert is not this alert's action.
+                caused_by = ((meta.get("alert") or {}).get("incident_id")) if isinstance(meta, dict) else None
+                if incident_id is None or (caused_by and caused_by == incident_id):
+                    return "🔒 DOMAIN BLOCKED (Pi-hole DNS)"
+                return "🔒 DOMAIN ALREADY ON BLOCKLIST (earlier alert, Pi-hole DNS)"
         return "🔓 ACTIVE / UNBLOCKED (Monitoring Only)"
 
     def mitigate(
@@ -741,15 +824,21 @@ class IPSMitigator:
         ti_engine: Optional[Any] = None,
         reason: str = "High Risk Identified",
         fp_verdict: Optional[dict] = None,
-        decision_state: str = "SUSPICIOUS"
-    ) -> None:
+        decision_state: str = "SUSPICIOUS",
+        alert_ref: Optional[dict] = None,
+    ) -> Dict[str, Any]:
+        """Autonomous containment for one alert. `alert_ref` names the alert ({"incident_id", "signature",
+        "target_source", "evidence_types"}) and is recorded with every block / isolation / tarpit this call creates.
+        Returns {"actions": graph containment action ids this call created, "domain_blocked": the domain this call
+        blocked or None, "pending_domain_block": the domain waiting for a person (interactive mode) or None}."""
+        result: Dict[str, Any] = {"actions": [], "domain_blocked": None, "pending_domain_block": None}
         LOGGER.debug("Mitigate evaluation triggered | Device: %s, Domain: %s, Risk: %.2f, Safe: %s", 
                      getattr(st, "hostname", "unknown"), target_domain, risk_score, is_safe)
 
         # FP ENGINE TIGHT GATING: Abort mitigation immediately if FP engine suppressed alert
         if fp_verdict and fp_verdict.get("suppress", False):
             LOGGER.info("🛡️ [IPS] Mitigation suppressed by FP Engine verdict for device %s.", getattr(st, "hostname", "unknown"))
-            return
+            return result
 
         client_ip = getattr(st, "client_ip", "unknown")
         hostname = getattr(st, "hostname", "unknown")
@@ -758,13 +847,16 @@ class IPSMitigator:
         device_type = str(getattr(st, "device_type", "unknown") or "unknown").lower()
         is_critical_device = device_type in CRITICAL_DEVICE_TYPES
 
-        # Fix bogus SHA256 MAC derivation bug: only format dev_id as MAC if it's not a SHA256 hash prefix
-        if (not mac_addr or mac_addr == "unknown") and dev_id != "unknown":
-            if len(dev_id) == 12 and all(c in "0123456789abcdefABCDEF" for c in dev_id) and not dev_id.isdigit():
-                mac_addr = ":".join(dev_id[i:i+2] for i in range(0, 12, 2))
+        # The device's MACs come from the state (T1, 2026-10-12). This used to FABRICATE a MAC from the device id when
+        # the MAC was unknown (any 12-hex-character id -- every hashed id), so containment could act on a MAC no
+        # device has.
+        device_macs = self._device_macs(dev_id, mac_addr)
+        if (not mac_addr or mac_addr == "unknown") and device_macs:
+            mac_addr = device_macs[0]
 
         # LATCHED CONTAINMENT PROTECTION:
-        # Full host containment (Layer-2 tarpit & Fritz!Box WAN isolation) cuts off 100% of network traffic.
+        # Containment (Layer-2 tarpit, router internet block) cuts the device's internet traffic (CONTAINMENT_MODEL.md
+        # section 1: today the IPv4 tarpit fakes only the gateway, so local IPv4 traffic continues).
         # As a result, feature query rates naturally decay to 0 over the 5-minute rolling window.
         # Automatically releasing hardware/tarpit isolation purely on zero-traffic decay creates an infinite flapping loop:
         # (ISOLATE -> 0 TRAFFIC -> DECAY TO 0 -> AUTO UNISOLATE -> C2 BEACON AGAIN -> RE-ISOLATE).
@@ -775,28 +867,11 @@ class IPSMitigator:
             should_unisolate_router = False
             tarpit_meta = None
             with self._lock:
-                if client_ip in self._tarpit_active_targets:
-                    LOGGER.info("Device %s marked safe. Releasing from ARP/NDP Tarpit.", client_ip)
-                    tarpit_meta = self._tarpit_active_targets.pop(client_ip, {})
-                    self._save_queues()
-                    # BUGFIX (live metrics audit): every other tarpit-release path
-                    # (sync_state_from_manager, unisolate_all) clears the
-                    # ips_tarpit_active gauge alongside the dict entry -- this
-                    # "device marked safe" auto-release path deleted the dict entry
-                    # but never cleared the gauge, so Prometheus/Grafana kept
-                    # reporting the device as actively tarpitted indefinitely (until
-                    # process restart) even though containment had genuinely lifted.
-                    # Confirmed live via a Prometheus snapshot showing
-                    # ips_tarpit_active=1 for a device long since released.
-                    try:
-                        ips_tarpit_active.labels(
-                            tarpit_meta.get("dev_id", dev_id), tarpit_meta.get("hostname", hostname), tarpit_meta.get("mac", mac_addr)
-                        ).set(0.0)
-                        ips_tarpit_active.remove(
-                            tarpit_meta.get("dev_id", dev_id), tarpit_meta.get("hostname", hostname), tarpit_meta.get("mac", mac_addr)
-                        )
-                    except Exception:
-                        pass
+                # this device's entries (by id or MAC; _pop_tarpit_entries also clears the gauges)
+                popped = self._pop_tarpit_entries(self._tarpit_keys_for([dev_id], device_macs))
+                if popped:
+                    LOGGER.info("Device %s marked safe. Releasing from ARP/NDP Tarpit.", hostname)
+                    tarpit_meta = popped[0]
                 if mac_addr in self._router_isolated_devices:
                     should_unisolate_router = True
 
@@ -808,20 +883,16 @@ class IPSMitigator:
             if should_unisolate_router:
                 LOGGER.info("Device %s marked safe. Initiating router un-isolation restore.", hostname)
                 self._unisolate_device_router(mac=mac_addr, ip=client_ip, hostname=hostname, dev_id=dev_id, reason="device_marked_safe")
-            return
+            return result
 
         # Check operator release cooldown status quietly
         now = time.time()
         cooldown_sec = float(self.config.get("operator_release_cooldown_seconds", 3600.0))
-        is_operator_released = False
         with self._lock:
             released_snapshot = dict(self._operator_released_devices)
-        for ident in (mac_addr, client_ip, hostname, dev_id):
-            if ident and ident != "unknown" and ident in released_snapshot:
-                rel_time = released_snapshot[ident]
-                if (now - rel_time) < cooldown_sec:
-                    is_operator_released = True
-                    break
+        # by device id or one of its MACs -- an address is reused and a name shared ("android-..."), so keying by
+        # them gave another device an hour without autonomous containment (T1, 2026-10-12)
+        is_operator_released = _ct.released_recently(released_snapshot, dev_id, device_macs, cooldown_sec, now)
 
         # ONBOARDING GRACE PERIOD (PRODUCTIZATION_ROADMAP.md Phase 4): a brand-new
         # network hasn't had time to build a real baseline yet, so every autonomous
@@ -868,13 +939,26 @@ class IPSMitigator:
                 safe_domains = set(self.config.get("safe_domains", []))
                 is_domain_safe = (target_domain in safe_domains) or (ti_engine and ti_engine.is_allowlisted(target_domain))
 
-                if not is_domain_safe:
+                if not is_domain_safe and interactive_mode:
+                    # Interactive mode: a person approves every block (router isolation and the tarpit already waited;
+                    # the domain block did not -- 2026-10-12). The engine offers it with an approval button.
+                    result["pending_domain_block"] = target_domain
+                    LOGGER.info("🛡️ [INTERACTIVE MODE] Pi-hole block of %s for %s queued for approval.",
+                                target_domain, hostname)
+                elif not is_domain_safe:
                     LOGGER.debug("Executing immediate Pi-hole block protocol for %s.", target_domain)
-                    self._block_domain(domain=target_domain, hostname=hostname, device_ip=client_ip, dev_id=dev_id, reason=reason)
+                    if self._block_domain(domain=target_domain, hostname=hostname, device_ip=client_ip, dev_id=dev_id,
+                                          reason=reason, alert_ref=alert_ref):
+                        meta = self.state_manager.get_ips_state().get("blocked_domains", {}).get(target_domain) or {}
+                        if alert_ref and (meta.get("alert") or {}).get("incident_id") == alert_ref.get("incident_id"):
+                            result["domain_blocked"] = target_domain
+                            if meta.get("_graph_action_id"):
+                                result["actions"].append(meta["_graph_action_id"])
                 else:
                     LOGGER.debug("Mitigation suppressed: %s is on the Global Trust/Safe list.", target_domain)
 
-        router_enabled = bool(self.config.get("ips_router_enabled", False)) and not onboarding_active
+        ips_on = bool(self.config.get("ips_enabled", True))
+        router_enabled = ips_on and bool(self.config.get("ips_router_enabled", False)) and not onboarding_active
         if router_enabled and (risk_score >= 8.5 or lateral_threat):
             if is_operator_released and not lateral_threat:
                 LOGGER.debug("🛡️ Router isolation suppressed for %s: Operator release cooldown active.", hostname)
@@ -910,13 +994,19 @@ class IPSMitigator:
                             self._router_isolated_devices[mac_addr] = {
                                 "ip": client_ip, "hostname": hostname, "dev_id": dev_id,
                                 "_graph_action_id": graph_action_id,
+                                **({"alert": dict(alert_ref)} if alert_ref else {}),
                             }
                             self._save_queues()
-                        self._arm_tarpit_for_dual_stack_coverage(
-                            client_ip=client_ip, mac_addr=mac_addr, hostname=hostname, dev_id=dev_id,
-                            reason=f"IPv6 coverage for router isolation: {reason}")
+                        if graph_action_id:
+                            result["actions"].append(graph_action_id)
+                        if self._arm_tarpit_for_dual_stack_coverage(
+                                client_ip=client_ip, mac_addr=mac_addr, hostname=hostname, dev_id=dev_id,
+                                reason=f"IPv6 coverage for router isolation: {reason}", alert_ref=alert_ref):
+                            gid = (self._tarpit_active_targets.get(_ct.tarpit_key(dev_id)) or {}).get("_graph_action_id")
+                            if gid:
+                                result["actions"].append(gid)
 
-        tarpit_enabled = bool(self.config.get("ips_tarpit_enabled", True)) and not onboarding_active
+        tarpit_enabled = ips_on and bool(self.config.get("ips_tarpit_enabled", True)) and not onboarding_active
         is_sim = bool(self.config.get("simulation_mode", False))
         if tarpit_enabled and (L2_AVAILABLE or is_sim) and (risk_score >= 9.0 or lateral_threat):
             if is_operator_released and not lateral_threat:
@@ -932,34 +1022,20 @@ class IPSMitigator:
                     ips_errors_metric.labels(target_type="mac_unknown_tarpit").inc()
                     LOGGER.warning("⚠️ MAC address unknown for %s; tarpit activation deferred until a later Zeek/ARP identification update.", client_ip)
                 else:
-                    with self._lock:
-                        self._free_address_key(client_ip, mac_addr)
-                        if client_ip not in self._tarpit_active_targets:
-                            if is_operator_released and lateral_threat:
-                                LOGGER.critical("🚨 [LATERAL THREAT OVERRIDE] Device %s attempted internal port scan during release cooldown! Layer-2 Tarpit re-enforced.", hostname)
-                            LOGGER.warning("High risk detected. Activating Layer-2 ARP/NDP Tarpit for IP %s (%s).", client_ip, mac_addr)
-                            graph_action_id = self._mirror_containment(
-                                dev_id, action_type="tarpit", status="active",
-                                target=client_ip, reason=reason)
-                            self._tarpit_active_targets[client_ip] = {
-                                "mac": mac_addr, "hostname": hostname, "dev_id": dev_id,
-                                "_graph_action_id": graph_action_id,
-                            }
-                            arp_ip = self._arp_ip_hint(client_ip, mac_addr, getattr(st, "known_ips", None) or ())
-                            if arp_ip:   # IPv4 fallback for the ARP half (see _arp_target_ip)
-                                self._tarpit_active_targets[client_ip]["arp_ip"] = arp_ip
-                            self._save_queues()
-                            ips_tarpit_active.labels(device=dev_id, hostname=hostname, mac=mac_addr).set(1.0)
-                            try:
-                                ips_tarpit_activations_total.labels(device=dev_id, hostname=hostname, mac=mac_addr).inc()
-                            except Exception:
-                                pass
-                            LOGGER.critical("⚠️ [DUAL-STACK TARPIT] Trapped compromised device %s (%s) in Layer-2 isolation.", hostname, client_ip)
-                        else:
-                            self._ensure_tarpit_target(client_ip=client_ip, mac_addr=mac_addr, hostname=hostname, dev_id=dev_id)
+                    created, _key = self._register_tarpit(
+                        dev_id, mac_addr, hostname, reason=reason, ip=client_ip,
+                        ipv4_candidates=getattr(st, "known_ips", None) or (), alert_ref=alert_ref)
+                    if created:
+                        gid = (self._tarpit_active_targets.get(_key) or {}).get("_graph_action_id")
+                        if gid:
+                            result["actions"].append(gid)
+                        if is_operator_released and lateral_threat:
+                            LOGGER.critical("🚨 [LATERAL THREAT OVERRIDE] Device %s attempted internal port scan during release cooldown! Layer-2 Tarpit re-enforced.", hostname)
+                        LOGGER.critical("⚠️ [DUAL-STACK TARPIT] Trapped compromised device %s (%s) in Layer-2 isolation.", hostname, dev_id)
+        return result
 
     def operator_isolate_router(self, dev_id: str, ip: str, mac: str, hostname: str,
-                                  reason: str = "Operator-requested Fritz!Box isolation") -> "tuple[bool, str]":
+                                  reason: str = "Operator-requested router isolation") -> "tuple[bool, str]":
         """Console 'Isolate via Fritz!Box' button: explicit operator action, independent
         of mitigate()'s own risk-score/interactive-mode/cooldown gating -- those gates
         exist to keep the AUTONOMOUS decision path cautious, not a human who just clicked
@@ -973,13 +1049,13 @@ class IPSMitigator:
         if not bool(self.config.get("ips_router_enabled", False)):
             return False, "Router isolation is disabled in config (ips_router_enabled=false)."
         if not mac or mac == "unknown":
-            return False, "No known MAC address for this device -- Fritz!Box isolation needs one."
+            return False, "No known MAC address for this device -- router isolation needs one."
         with self._lock:
             if mac in self._router_isolated_devices:
                 return True, "Already isolated."
         success = self._isolate_device_router(mac=mac, ip=ip, hostname=hostname, dev_id=dev_id, reason=reason)
         if not success:
-            return False, "Fritz!Box refused or was unreachable for this action -- see server logs for detail."
+            return False, "The router refused or was unreachable for this action -- see server logs for detail."
         graph_action_id = self._mirror_containment(dev_id, action_type="router_isolate", status="active", target=mac, reason=reason)
         with self._lock:
             self._router_isolated_devices[mac] = {"ip": ip, "hostname": hostname, "dev_id": dev_id, "_graph_action_id": graph_action_id}
@@ -997,8 +1073,8 @@ class IPSMitigator:
             client_ip=ip, mac_addr=mac, hostname=hostname, dev_id=dev_id,
             reason=f"IPv6 coverage for router isolation: {reason}")
         if tarpit_armed:
-            return True, "Isolated via Fritz!Box (IPv4) + Layer-2 tarpit armed (covers IPv6)."
-        return True, "Isolated via Fritz!Box."
+            return True, "Isolated via the router (IPv4) + Layer-2 tarpit armed (covers IPv6)."
+        return True, "Isolated via the router."
 
     def carry_containment_after_merge(self, orphan_mac: str, orphan_ip: str, canonical_id: str,
                                         canonical_mac: str, canonical_ip: str, hostname: str) -> List[str]:
@@ -1011,7 +1087,9 @@ class IPSMitigator:
             return bool(v) and v != "unknown"
         with self._lock:
             router_contained = usable(orphan_mac) and orphan_mac in self._router_isolated_devices
-            tarpit_contained = usable(orphan_ip) and orphan_ip in self._tarpit_active_targets
+            # StateManager.merge_into_canonical() relabelled the orphan's entry to the canonical id; re-key it
+            self._tarpit_active_targets = _ct.normalize_tarpit_targets(self._tarpit_active_targets)
+            tarpit_contained = bool(self._tarpit_keys_for([canonical_id], [orphan_mac]))
         if not (router_contained or tarpit_contained):
             return []
         reason = f"Containment carried over: a contained identity was merged into device {canonical_id}"
@@ -1023,13 +1101,15 @@ class IPSMitigator:
             elif not ok:
                 LOGGER.warning("Could not extend router isolation to merged device %s (%s): %s",
                                canonical_id, canonical_mac, msg)
-        if tarpit_contained and usable(canonical_ip) and canonical_ip != orphan_ip:
-            ok, msg = self.operator_tarpit(canonical_id, canonical_ip, canonical_mac, hostname, reason=reason)
-            if ok and msg != "Already tarpitted.":
+        if tarpit_contained:
+            # one entry for the device, acting on every MAC it is known by now (the merged-in ones included)
+            with self._lock:
+                before = set(_ct.entry_macs(self._tarpit_active_targets.get(_ct.tarpit_key(canonical_id), {})))
+            self._register_tarpit(canonical_id, canonical_mac, hostname, reason=reason, ip=canonical_ip)
+            with self._lock:
+                after = set(_ct.entry_macs(self._tarpit_active_targets.get(_ct.tarpit_key(canonical_id), {})))
+            if after - before:
                 added.append("tarpit")
-            elif not ok:
-                LOGGER.warning("Could not extend the tarpit to merged device %s (%s): %s",
-                               canonical_id, canonical_ip, msg)
         LOGGER.critical("🔗 [CONTAINMENT CARRIED OVER] %s (%s): orphan containment kept (mac=%s ip=%s)%s.",
                         hostname, canonical_id, orphan_mac, orphan_ip,
                         f", extended to {', '.join(added)}" if added else "")
@@ -1050,29 +1130,206 @@ class IPSMitigator:
                 return False, ("The engine's Layer-2 tarpit isn't armed (no AF_PACKET support or no raw-socket "
                                "permission where the engine runs, or the engine has not started yet) -- see the engine log.")
             return False, "Tarpit subsystem isn't armed on this server (no AF_PACKET support, or no raw-socket permission) -- see server logs."
-        if not ip or ip == "unknown":
-            return False, "No known IP address for this device -- the tarpit needs one."
-        if not mac or mac == "unknown":
+        if not self._device_macs(dev_id, mac):
             return False, "No known MAC address for this device -- the tarpit needs one."
-        arp_ip = self._arp_ip_hint(ip, mac, ipv4_candidates)   # IPv4 fallback for the ARP half (see _arp_target_ip)
-        with self._lock:
-            self._free_address_key(ip, mac)
-            if ip in self._tarpit_active_targets:
-                return True, "Already tarpitted."
-            graph_action_id = self._mirror_containment(dev_id, action_type="tarpit", status="active", target=ip, reason=reason)
-            self._tarpit_active_targets[ip] = {"mac": mac, "hostname": hostname, "dev_id": dev_id, "_graph_action_id": graph_action_id}
-            if arp_ip:
-                self._tarpit_active_targets[ip]["arp_ip"] = arp_ip
-            self._save_queues()
-        try:
-            ips_tarpit_active.labels(device=dev_id, hostname=hostname, mac=mac).set(1.0)
-            ips_tarpit_activations_total.labels(device=dev_id, hostname=hostname, mac=mac).inc()
-        except Exception:
-            pass
-        LOGGER.critical("⚠️ [OPERATOR TARPIT] Console-requested Layer-2 isolation for %s (%s).", hostname, ip)
+        created, _key = self._register_tarpit(dev_id, mac, hostname, reason=reason, ip=ip,
+                                              ipv4_candidates=ipv4_candidates)
+        if not created:
+            return True, "Already tarpitted."
+        LOGGER.critical("⚠️ [OPERATOR TARPIT] Console-requested Layer-2 isolation for %s (%s).", hostname, dev_id)
         if getattr(self, "_state_only", False):
             return True, "Tarpit requested (Layer-2 ARP/NDP) -- the engine applies it within one cycle."
         return True, "Tarpitted (Layer-2 ARP/NDP)."
+
+    # The ARP half's gateway is DISCOVERED (the kernel's default route), never configured: config `fritz_ip` is the
+    # address of a router integration, not this network's gateway, and its default made the tarpit fake the wrong
+    # address on every network that is not 192.168.1.0/24 (CONTAINMENT_MODEL.md section 1, T0). Re-read every minute
+    # so a changed gateway is followed; its real MAC (for Release) from the kernel's neighbour table.
+    _GATEWAY_REFRESH_SECONDS = 60.0
+    # After Release the device still holds the fake gateway MAC until its own cache entry expires (~1 min, live test
+    # 2026-10-12). The loop sends it the real one for this many rounds (2 s apart), so access returns at once.
+    _RESTORE_ROUNDS = 3
+
+    def _tarpit_gateway(self):
+        """(gateway IPv4, its real MAC or None) -- (None, None) when no IPv4 default route exists."""
+        now = time.monotonic()
+        cache = getattr(self, "_gateway_cache", None)
+        if cache is not None and now - cache[0] < self._GATEWAY_REFRESH_SECONDS:
+            return cache[1], cache[2]
+        gw, gw_mac = None, None
+        try:
+            gw = _discover_gateway_ipv4()
+        except Exception as exc:
+            LOGGER.debug("ARP Tarpit: gateway discovery failed: %s", exc)
+        if not self._is_arp_ipv4(gw):
+            gw = None
+        if gw:
+            try:
+                gw_mac = l2_raw.neighbor_mac(gw)
+            except Exception as exc:
+                LOGGER.debug("ARP Tarpit: no neighbour entry for the gateway %s: %s", gw, exc)
+        self._gateway_cache = (now, gw, gw_mac)
+        return gw, gw_mac
+
+    def _arp_reply_for(self, mac: str, meta: dict, gateway_ip: str, sender_mac: str, no_ipv4_logged: set):
+        """(ifname, frame) telling the device's `mac` that `gateway_ip` is at `sender_mac`; None when that MAC has no
+        usable IPv4 (the kernel's neighbour table for the MAC, else the hint stored for it) or no interface reaches it."""
+        hint = (meta.get("arp_ips") or {}).get(mac)
+        arp_ip = self._arp_target_ip("", mac, [hint] if hint else ())   # neighbour table first, then the hint
+        if not self._is_arp_ipv4(arp_ip):
+            if mac not in no_ipv4_logged:
+                no_ipv4_logged.add(mac)
+                LOGGER.info("ARP Tarpit: no IPv4 address known for %s (%s); only the NDP half covers it.",
+                            meta.get("dev_id", "?"), mac)
+            return None
+        no_ipv4_logged.discard(mac)
+        ifname = l2_raw.interface_for(arp_ip)
+        src_mac = l2_raw.interface_mac(ifname) if ifname else None
+        if not (ifname and src_mac):
+            LOGGER.debug("ARP Tarpit: no interface/MAC found for %s", arp_ip)
+            return None
+        return ifname, l2_raw.build_arp_reply(eth_src=src_mac, eth_dst=mac, sender_mac=sender_mac,
+                                              sender_ip=gateway_ip, target_mac=mac, target_ip=arp_ip)
+
+    # T1: the entries follow the device -- its MACs and IPv4 hint are re-read from the state this often.
+    _TARGET_REFRESH_SECONDS = 10.0
+
+    def _refresh_targets_from_state(self) -> None:
+        """Re-keys the entries by device (an identity merge relabels an entry's id) and sets each one's MACs to what
+        the device is known by now, with the IPv4 hint of its current MAC. A device no longer in the state keeps its
+        last MACs (containment holds until released)."""
+        sm = self.state_manager
+        with self._lock:
+            normalized = _ct.normalize_tarpit_targets(self._tarpit_active_targets)
+            changed = normalized != self._tarpit_active_targets
+            self._tarpit_active_targets = normalized
+            items = list(self._tarpit_active_targets.items())
+        for key, meta in items:
+            dev_id = meta.get("dev_id")
+            macs = self._device_macs(dev_id)
+            hint_mac, hint_ip = None, None
+            try:
+                if _ct._usable(dev_id) and sm.has_device(dev_id):
+                    with sm.lock_device(dev_id) as st:
+                        hint_mac = _ct.norm_mac(getattr(st, "mac_address", None))
+                        hint_ip = self._ipv4_hint(getattr(st, "client_ip", None), hint_mac,
+                                                  list(getattr(st, "known_ips", None) or ()))
+            except Exception as exc:
+                LOGGER.debug("Tarpit refresh: device %s not readable: %s", dev_id, exc)
+            with self._lock:
+                live = self._tarpit_active_targets.get(key)
+                if live is None:
+                    continue
+                if macs and macs != _ct.entry_macs(live):
+                    LOGGER.info("Tarpit for %s now acts on %s (was %s).", dev_id, macs, _ct.entry_macs(live))
+                    live["macs"], live["mac"] = macs, macs[0]
+                    changed = True
+                if hint_ip and hint_mac in _ct.entry_macs(live) and (live.get("arp_ips") or {}).get(hint_mac) != hint_ip:
+                    live.setdefault("arp_ips", {})[hint_mac] = hint_ip
+                    changed = True
+        if changed:
+            with self._lock:
+                self._save_queues()
+
+    # T1 status: the first seconds are "requested"; observations older than the window no longer count.
+    _STATUS_GRACE_SECONDS = 10.0
+    _STATUS_WINDOW_SECONDS = 120.0
+
+    def _status_for(self, meta: dict, now: float) -> str:
+        """The device's containment status from what the observer saw of its frames since containment started (see
+        mitigation/containment.py for the states). Never inferred: no frames, no claim."""
+        since = float(meta.get("since") or 0.0)
+        if now - since < self._STATUS_GRACE_SECONDS:
+            return _ct.REQUESTED
+        start = since + self._STATUS_GRACE_SECONDS
+        recent = now - self._STATUS_WINDOW_SECONDS
+        with self._observed_lock:
+            obs = [self._observed.get(m, {}) for m in _ct.entry_macs(meta)]
+        last_tarpit = max([o.get("to_tarpit", 0.0) for o in obs] or [0.0])
+        last_gateway = max([o.get("to_gateway", 0.0) for o in obs] or [0.0])
+        last_frame = max([o.get("frame", 0.0) for o in obs] or [0.0])
+        if last_gateway >= max(start, recent) and last_gateway >= last_tarpit:
+            return _ct.NOT_REACHING
+        if last_tarpit >= recent:
+            return _ct.HOLDING
+        if last_frame >= recent:
+            return _ct.UNCONFIRMED
+        return _ct.OFFLINE
+
+    def _update_statuses(self, now: float) -> None:
+        """Records each entry's status; a change to "not reaching" is queued for the engine to alert on (once per
+        change)."""
+        changed = False
+        with self._lock:
+            for key, meta in self._tarpit_active_targets.items():
+                if not isinstance(meta, dict):
+                    continue
+                status = self._status_for(meta, now)
+                if status == meta.get("status"):
+                    continue
+                old = meta.get("status")
+                meta["status"], meta["status_at"] = status, now
+                changed = True
+                LOGGER.info("Tarpit status for %s (%s): %s -> %s", meta.get("hostname", "?"), meta.get("dev_id", "?"),
+                            old, status)
+                if status == _ct.NOT_REACHING:
+                    self._containment_events.append({
+                        "type": "tarpit_not_reaching", "dev_id": meta.get("dev_id"), "hostname": meta.get("hostname"),
+                        "macs": _ct.entry_macs(meta), "at": now})
+            if changed:
+                self._save_queues()
+
+    def _observer_loop(self) -> None:
+        """Watches the frames the contained devices send that reach this box: a frame to the tarpit's fake address
+        proves the device obeys (holding); after the grace period a frame to the gateway's real MAC proves it is not
+        reached; any frame shows it is active. A kernel filter passes only the contained MACs' frames. Frames the
+        switch does not bring to this box are not seen -- the status then stays "unconfirmed", never guessed."""
+        bogus_mac = "00:11:22:33:44:55"
+        try:
+            sock = l2_raw.open_raw()
+            sock.settimeout(1.0)
+        except Exception as exc:
+            LOGGER.warning("Containment observer not started: %s", exc)
+            return
+        filtered_for = None
+        while True:
+            try:
+                with self._lock:
+                    macs = sorted({m for meta in self._tarpit_active_targets.values() for m in _ct.entry_macs(meta)})
+                if macs != filtered_for:
+                    l2_raw.attach_filter(sock, l2_raw.src_mac_filter_program(macs))
+                    filtered_for = macs
+                    with self._observed_lock:
+                        for m in list(self._observed):
+                            if m not in macs:
+                                self._observed.pop(m, None)
+                wanted = set(macs)
+                try:
+                    frame, _ifname = l2_raw.recv_frame(sock)
+                except (TimeoutError, OSError) as exc:
+                    if isinstance(exc, TimeoutError) or "timed out" in str(exc):
+                        continue
+                    raise
+                self._observe_frame(frame, wanted, bogus_mac)
+            except Exception as exc:
+                LOGGER.debug("Containment observer iteration exception: %s", exc)
+                time.sleep(0.5)
+
+    def _observe_frame(self, frame: bytes, wanted: set, bogus_mac: str) -> None:
+        if len(frame) < 14:
+            return
+        dst, src = l2_raw.mac_str(frame[0:6]), l2_raw.mac_str(frame[6:12])
+        if src not in wanted:
+            return
+        now = time.time()
+        gateway_mac = _ct.norm_mac((getattr(self, "_gateway_cache", None) or (0, None, None))[2])
+        with self._observed_lock:
+            o = self._observed.setdefault(src, {})
+            o["frame"] = now
+            if dst == bogus_mac:
+                o["to_tarpit"] = now
+            elif gateway_mac and dst == gateway_mac:
+                o["to_gateway"] = now
 
     def _arp_tarpit_loop(self) -> None:
         bogus_mac = "00:11:22:33:44:55"
@@ -1082,32 +1339,64 @@ class IPSMitigator:
             LOGGER.debug("ARP Tarpit socket exception: %s", exc)
             return
         no_ipv4_logged = set()
+        no_gateway_logged = False
+        previous: Dict[str, dict] = {}       # MAC -> meta of the entries held last round
+        restoring: Dict[str, list] = {}      # MAC -> [meta, rounds left] of MACs released since
         while True:
-            gateway_ip = self.config.get("fritz_ip", "192.168.1.1")
+            now = time.time()
+            if now - self._targets_refreshed_at >= self._TARGET_REFRESH_SECONDS:
+                self._targets_refreshed_at = now
+                try:
+                    self._refresh_targets_from_state()
+                except Exception as exc:
+                    LOGGER.debug("Tarpit refresh failed: %s", exc)
+            gateway_ip, gateway_mac = self._tarpit_gateway()
             with self._lock:
                 targets = dict(self._tarpit_active_targets)
-            for ip, meta in targets.items():
-                # One target per try: an exception here used to abort the round for every target after it.
-                try:
-                    mac = meta["mac"]
-                    arp_ip = self._arp_target_ip(ip, mac, [meta["arp_ip"]] if meta.get("arp_ip") else ())
-                    if not self._is_arp_ipv4(arp_ip):
-                        if ip not in no_ipv4_logged:
-                            no_ipv4_logged.add(ip)
-                            LOGGER.info("ARP Tarpit: no IPv4 address known for %s (%s); only the NDP half covers it.",
-                                        ip, mac)
-                        continue
-                    no_ipv4_logged.discard(ip)
-                    ifname = l2_raw.interface_for(arp_ip)
-                    src_mac = l2_raw.interface_mac(ifname) if ifname else None
-                    if not (ifname and src_mac):
-                        LOGGER.debug("ARP Tarpit: no interface/MAC found for %s", arp_ip)
-                        continue
-                    pkt = l2_raw.build_arp_reply(eth_src=src_mac, eth_dst=mac, sender_mac=bogus_mac,
-                                                 sender_ip=gateway_ip, target_mac=mac, target_ip=arp_ip)
-                    l2_raw.send_frame(sock, ifname, pkt)
-                except Exception as exc:
-                    LOGGER.debug("ARP Tarpit exception for %s: %s", ip, exc)
+            # Released = a MAC held last round and by no entry now. Every release path -- Release, release-all, the
+            # safe-device auto-release, another process's change synced in -- ends here.
+            current = {mac: meta for meta in targets.values() if isinstance(meta, dict) for mac in _ct.entry_macs(meta)}
+            for mac, meta in previous.items():
+                if mac not in current:
+                    restoring[mac] = [meta, self._RESTORE_ROUNDS]
+            for mac in current:
+                restoring.pop(mac, None)
+            previous = current
+            if not gateway_ip:
+                if not no_gateway_logged:
+                    no_gateway_logged = True
+                    LOGGER.warning("ARP Tarpit: no IPv4 default gateway discovered -- the ARP half is idle until one "
+                                   "is (the NDP half still acts).")
+                restoring.clear()
+            else:
+                no_gateway_logged = False
+                for mac, meta in current.items():
+                    # One MAC per try: an exception here used to abort the round for every target after it.
+                    try:
+                        out = self._arp_reply_for(mac, meta, gateway_ip, bogus_mac, no_ipv4_logged)
+                        if out:
+                            l2_raw.send_frame(sock, out[0], out[1])
+                    except Exception as exc:
+                        LOGGER.debug("ARP Tarpit exception for %s: %s", mac, exc)
+                for mac, entry in list(restoring.items()):
+                    meta, left = entry
+                    try:
+                        if gateway_mac:
+                            out = self._arp_reply_for(mac, meta, gateway_ip, gateway_mac, no_ipv4_logged)
+                            if out:
+                                l2_raw.send_frame(sock, out[0], out[1])
+                        elif left == self._RESTORE_ROUNDS:
+                            LOGGER.info("ARP Tarpit: released %s, but the gateway's real MAC is unknown -- its cache "
+                                        "recovers on its own (about a minute).", mac)
+                    except Exception as exc:
+                        LOGGER.debug("ARP Tarpit restore exception for %s: %s", mac, exc)
+                    entry[1] -= 1
+                    if entry[1] <= 0:
+                        restoring.pop(mac, None)
+            try:
+                self._update_statuses(time.time())
+            except Exception as exc:
+                LOGGER.debug("Tarpit status update failed: %s", exc)
             time.sleep(2.0)
 
     def _pihole_domain_url(self, api_url: str, api_path: str, domain: str = "") -> str:
@@ -1127,7 +1416,8 @@ class IPSMitigator:
     def check_pihole_health(self, timeout: float = 3.0) -> "tuple[bool, str]":
         return check_pihole_health(self.config, timeout=timeout, session=self.session)
 
-    def _block_domain(self, domain: str, hostname: str, device_ip: str, dev_id: str, reason: str = "") -> bool:
+    def _block_domain(self, domain: str, hostname: str, device_ip: str, dev_id: str, reason: str = "",
+                      alert_ref: Optional[dict] = None) -> bool:
         ips_state = self.state_manager.get_ips_state()
         
         # Self-healing desync check: Clear queues if block is already confirmed active
@@ -1215,7 +1505,7 @@ class IPSMitigator:
                     res = subprocess.run(["pihole", "deny", domain], capture_output=True, text=True, timeout=5.0)
                     if res.returncode == 0:
                         LOGGER.info(f"Successfully blocked {domain} using local pihole CLI.")
-                        self._finalize_block(domain, hostname, device_ip, dev_id, comment=comment)
+                        self._finalize_block(domain, hostname, device_ip, dev_id, comment=comment, alert_ref=alert_ref)
                         return True
                     else:
                         LOGGER.error(f"Local CLI fallback failed: {res.stderr}")
@@ -1236,7 +1526,7 @@ class IPSMitigator:
             if resp.status_code in (200, 201, 204):
                 if "Not authorized" in resp.text:
                     return False
-                self._finalize_block(domain, hostname, device_ip, dev_id, comment=comment)
+                self._finalize_block(domain, hostname, device_ip, dev_id, comment=comment, alert_ref=alert_ref)
                 return True
             elif 400 <= resp.status_code < 500 and resp.status_code != 429:
                 self._add_to_dead_letter(domain, hostname, dev_id, f"HTTP {resp.status_code}: {resp.text}")
@@ -1296,7 +1586,7 @@ class IPSMitigator:
         self._mirror_containment(dev_id, action_type="dead_letter", status="failed",
                                    target=domain, reason=error_msg)
 
-    def _finalize_block(self, domain, hostname, device_ip, dev_id, comment: str = ""):
+    def _finalize_block(self, domain, hostname, device_ip, dev_id, comment: str = "", alert_ref: Optional[dict] = None):
         timestamp = time.time()
         # PHASE 14: the "Home-IDS Auto-Block | Device: ... | Trigger: ..." comment is only
         # guaranteed to reach Pi-hole itself on the primary v6 API path (it's passed in the
@@ -1319,6 +1609,9 @@ class IPSMitigator:
                 "persisted": True,
                 "comment": comment or "Home-IDS Auto-Block",
                 "_graph_action_id": graph_action_id,
+                # the alert that caused this block (incident, signature, the evidence that fired); None for a block an
+                # operator made by hand -- 2026-10-12, no record linked a block to its cause before
+                "alert": dict(alert_ref) if alert_ref else None,
             }
             self.state_manager.save_ips_state(ips_state)
         self.state_manager.flush_to_disk()
@@ -1529,138 +1822,131 @@ class IPSMitigator:
             ips_errors_metric.labels(target_type="router_unisolate_connection").inc()
         return False
 
+    def _resolve_release_targets(self, identifier: str) -> "tuple[set, set]":
+        """(device ids, MACs) an operator's release names. A device id, a tarpit key or a MAC names that device; an
+        address names the device that holds it NOW (StateManager), never whatever was once registered under it; a
+        name is not an identifier (names are shared). Caller holds self._lock."""
+        ident = str(identifier or "").strip()
+        dev_ids, macs = set(), set()
+        if not _ct._usable(ident):
+            return dev_ids, macs
+        low = ident.lower()
+        for key, meta in self._tarpit_active_targets.items():
+            if not isinstance(meta, dict):
+                continue
+            if ident in (key, meta.get("dev_id")) or low in _ct.entry_macs(meta):
+                dev_ids.add(meta.get("dev_id"))
+                macs.update(_ct.entry_macs(meta))
+        for mac, meta in self._router_isolated_devices.items():
+            if ident == meta.get("dev_id") or low == _ct.norm_mac(mac):
+                dev_ids.add(meta.get("dev_id"))
+                macs.add(_ct.norm_mac(mac))
+        if not dev_ids and not macs:
+            try:
+                ipaddress.ip_address(ident.split("%", 1)[0])
+                holder = self.state_manager.get_device_id_for_ip(ident)
+                if holder:
+                    dev_ids.add(holder)
+            except ValueError:
+                if self.state_manager.has_device(ident):
+                    dev_ids.add(ident)
+        for d in list(dev_ids):
+            macs.update(self._device_macs(d))
+        dev_ids.discard(None)
+        return {d for d in dev_ids if _ct._usable(d)}, {m for m in macs if _ct._usable(m)}
+
     def release_device(self, identifier: str) -> bool:
         """
-        Explicit operator release method for isolated devices.
-        Restores Layer-2 ARP tarpit and Fritz!Box hardware WAN access WITHOUT 
-        adding the device to safe_ips (preserving continuous threat monitoring).
+        Explicit operator release: lifts the tarpit and router isolation of the device `identifier` names (device id,
+        MAC, or the address it holds now -- _resolve_release_targets), and the Pi-hole blocks made because of that
+        device, WITHOUT adding it to safe_ips (monitoring continues). `identifier` may also be a blocked domain itself.
+        T1 (2026-10-12): by device. Matching by address or name released, or kept, another device's containment and
+        domain blocks once an address changed hands or two devices shared a name.
         AUDIT FIX #8: Collect targets under lock then execute HTTP I/O outside the lock
         to avoid blocking all lock-protected operations during a network round-trip.
         """
         released = False
-        target_ip = None
-        target_mac = None
-        target_host = "unknown"
-        target_dev = "unknown"
-        tarpit_graph_action_id = None
-        router_graph_action_id = None
-
-        # Phase 1: Collect targets & update in-memory state under lock
+        router_targets = []
         with self._lock:
-            for ip, meta in list(self._tarpit_active_targets.items()):
-                if identifier in (ip, meta.get("mac"), meta.get("hostname"), meta.get("dev_id")):
-                    target_ip = ip
-                    target_mac = meta.get("mac")
-                    target_host = meta.get("hostname", "unknown")
-                    target_dev = meta.get("dev_id", "unknown")
-                    tarpit_graph_action_id = meta.get("_graph_action_id")
-                    del self._tarpit_active_targets[ip]
-                    self._save_queues()
-                    released = True
-                    try:
-                        ips_tarpit_active.labels(target_dev, target_host, target_mac).set(0.0)
-                        ips_tarpit_active.remove(target_dev, target_host, target_mac)
-                    except Exception:
-                        pass
-                    LOGGER.info("✅ [RELEASE] Operator released device %s (%s) from Layer-2 Tarpit.", target_host, target_ip)
-
+            dev_ids, macs = self._resolve_release_targets(identifier)
+            popped = self._pop_tarpit_entries(self._tarpit_keys_for(dev_ids, macs))
+            for meta in popped:
+                released = True
+                LOGGER.info("✅ [RELEASE] Operator released device %s (%s) from the Layer-2 tarpit.",
+                            meta.get("hostname", "unknown"), meta.get("dev_id", "unknown"))
             for mac, meta in list(self._router_isolated_devices.items()):
-                if identifier in (mac, meta.get("ip"), meta.get("hostname"), meta.get("dev_id")):
-                    target_mac = mac
-                    target_ip = meta.get("ip", target_ip)
-                    target_host = meta.get("hostname", target_host)
-                    target_dev = meta.get("dev_id", target_dev)
-                    router_graph_action_id = meta.get("_graph_action_id")
+                if meta.get("dev_id") in dev_ids or _ct.norm_mac(mac) in macs:
                     del self._router_isolated_devices[mac]
-                    self._save_queues()
+                    router_targets.append((mac, meta))
                     try:
-                        ips_router_isolated_active.labels(target_dev, target_host, target_mac).set(0.0)
-                        ips_router_isolated_active.remove(target_dev, target_host, target_mac)
+                        ips_router_isolated_active.labels(meta.get("dev_id", ""), meta.get("hostname", ""), mac).set(0.0)
+                        ips_router_isolated_active.remove(meta.get("dev_id", ""), meta.get("hostname", ""), mac)
                     except Exception:
                         pass
+            if router_targets:
+                self._save_queues()
 
-        # Phase 2: Execute router HTTP call + graph mirror releases OUTSIDE the lock
-        # to avoid blocking other operations. Mirrored HERE (not via
-        # _unisolate_device_router()'s own release-mirror below) because this method
-        # already deleted the dict entries above -- by the time _unisolate_device_router()
-        # runs, self._router_isolated_devices no longer has this mac, so its own
-        # mirror-release logic would find nothing to release.
-        self._mirror_containment_released(tarpit_graph_action_id)
-        self._mirror_containment_released(router_graph_action_id)
-        if target_mac and target_mac != "unknown":
-            self._unisolate_device_router(mac=target_mac, ip=target_ip or "0.0.0.0", hostname=target_host, dev_id=target_dev, reason="manual")
+        # Phase 2: router HTTP calls + graph mirror releases OUTSIDE the lock. Mirrored here (not via
+        # _unisolate_device_router()'s own release-mirror): the dict entries are already gone.
+        for meta in popped:
+            self._mirror_containment_released(meta.get("_graph_action_id"))
+        for mac, meta in router_targets:
+            self._mirror_containment_released(meta.get("_graph_action_id"))
+            self._unisolate_device_router(mac=mac, ip=meta.get("ip") or "0.0.0.0", hostname=meta.get("hostname", "unknown"),
+                                          dev_id=meta.get("dev_id", "unknown"), reason="manual")
             released = True
-            LOGGER.info("✅ [RELEASE] Operator released device %s (%s) from Hardware Router Isolation.", target_host, target_mac)
+            LOGGER.info("✅ [RELEASE] Operator released device %s (%s) from router isolation.",
+                        meta.get("hostname", "unknown"), mac)
 
-        # ALSO RELEASE ASSOCIATED PI-HOLE BLOCKED DOMAINS FOR THIS DEVICE
+        # The Pi-hole blocks made because of this device (by its id), or the domain itself when one was named.
+        ident = str(identifier or "").strip()
         ips_state = self.state_manager.get_ips_state()
         blocked_dict = ips_state.get("blocked_domains", {})
-        domains_to_unblock = [dom for dom, meta in blocked_dict.items() if identifier in (dom, meta.get("device_id"), meta.get("hostname"), meta.get("device_ip"))]
+        domains_to_unblock = [dom for dom, meta in blocked_dict.items()
+                              if dom == ident or (isinstance(meta, dict) and meta.get("device_id") in dev_ids)]
         for dom in domains_to_unblock:
             self.unblock_domain(dom, reason="manual")
             released = True
 
-        # Clear retry & dead-letter queue items matching identifier
+        # Clear retry & dead-letter queue items of this device / domain
         with self._lock:
-            stale_retries = [dom for dom, meta in self._retry_queue.items() if identifier in (dom, meta.get("device_id"), meta.get("hostname"), meta.get("device_ip"))]
+            stale_retries = [dom for dom, meta in self._retry_queue.items()
+                             if dom == ident or meta.get("device_id") in dev_ids]
             for dom in stale_retries:
                 meta = self._retry_queue.pop(dom, {})
                 try: ips_queue_status_gauge.remove(meta.get("device_id", ""), meta.get("hostname", ""), dom)
                 except Exception: pass
                 released = True
 
-            stale_dead = [dom for dom, meta in self._dead_letter.items() if identifier in (dom, meta.get("device_id"), meta.get("hostname"))]
+            stale_dead = [dom for dom, meta in self._dead_letter.items()
+                          if dom == ident or meta.get("device_id") in dev_ids]
             for dom in stale_dead:
                 meta = self._dead_letter.pop(dom, {})
                 try: ips_dead_letter_gauge.remove(meta.get("device_id", ""), meta.get("hostname", ""), dom)
                 except Exception: pass
                 released = True
 
-        if released or identifier:
+        if dev_ids or macs:
+            # the post-release cooldown, by device id and MAC (read by mitigate() via containment.released_recently)
             now = time.time()
             with self._lock:
-                for k in (target_mac, target_ip, target_host, target_dev, identifier):
-                    if k and k != "unknown":
-                        self._operator_released_devices[k] = now
+                for k in list(dev_ids) + sorted(macs):
+                    self._operator_released_devices[k] = now
                 self._save_queues()
 
         return released
 
     def release_all_devices(self) -> int:
-        """
-        Explicit operator release method for ALL isolated devices.
-        Un-isolates all tarpitted and router-isolated targets.
-
-        IDENTITY NOTE: The identity system in identity.py anchors device identity to
-        client IP address (not MAC) for local private IPs. _tarpit_active_targets is
-        keyed by IP, and mobile devices change MAC frequently (MAC randomization), so
-        IP is the canonical and stable identifier for release operations.
-        Priority: IP → dev_id → hostname. MAC is NEVER used as a primary key.
-        """
-        released_count = 0
-        # Use a set of (identifier, type) pairs to ensure uniqueness per real device
-        targets_to_release: set = set()
-
+        """Explicit operator release of ALL contained devices (tarpit and router isolation), one device at a time."""
         with self._lock:
-            for ip, meta in list(self._tarpit_active_targets.items()):
-                # IP is the stable canonical key (identity is IP-anchored for local devices)
-                # dev_id is the second most reliable; hostname is last resort (collision risk)
-                identifier = ip or meta.get("dev_id") or meta.get("hostname")
-                if identifier:
-                    targets_to_release.add(identifier)
-            for mac, meta in list(self._router_isolated_devices.items()):
-                # For router-isolated devices (keyed by MAC), use IP if available,
-                # otherwise fall back to dev_id. Only use MAC as absolute last resort
-                # since mobile devices randomize MAC addresses per connection.
-                identifier = meta.get("ip") or meta.get("dev_id") or mac
-                if identifier and identifier != "unknown":
-                    targets_to_release.add(identifier)
+            idents = {m.get("dev_id") for m in self._tarpit_active_targets.values()
+                      if isinstance(m, dict) and _ct._usable(m.get("dev_id"))}
+            idents |= {(m.get("dev_id") if _ct._usable(m.get("dev_id")) else mac)
+                       for mac, m in self._router_isolated_devices.items() if isinstance(m, dict)}
+            idents |= {k for k, m in self._tarpit_active_targets.items()
+                       if isinstance(m, dict) and not _ct._usable(m.get("dev_id"))}
+        return sum(1 for ident in idents if self.release_device(ident))
 
-        for target in targets_to_release:
-            if self.release_device(target):
-                released_count += 1
-
-        return released_count
     def unisolate_all(self, mac_addr: str, ip_addr: str):
         """Completely un-isolates a device (Router + Tarpit) across MAC and IP changes[cite: 28].
 
@@ -1688,13 +1974,17 @@ class IPSMitigator:
         router_was_isolated = False
 
         with self._lock:
-            if ip_addr in self._tarpit_active_targets:
-                meta = self._tarpit_active_targets[ip_addr]
+            self._tarpit_active_targets = _ct.normalize_tarpit_targets(self._tarpit_active_targets)
+            # Unchanged behaviour with device keys: the entry registered under `ip_addr` is removed, as when entries
+            # were keyed by it. (That a linked MAC rotation releases containment at all is the caller's decision in
+            # identity code -- parked for T5 / identity P4, MASTER_TODO Section 0b, T1 finding (a).)
+            keys = [k for k, m in self._tarpit_active_targets.items()
+                    if isinstance(m, dict) and _ct._usable(ip_addr) and m.get("registered_ip") == ip_addr]
+            for meta in self._pop_tarpit_entries(keys):
                 target_hostname = meta.get("hostname", "unknown")
                 target_dev = meta.get("dev_id", "unknown")
                 tarpit_graph_action_id = meta.get("_graph_action_id")
-                del self._tarpit_active_targets[ip_addr]
-                LOGGER.info("🧹 Cleared Tarpit entry for reassigned IP %s[cite: 28]", ip_addr)
+                LOGGER.info("🧹 Cleared Tarpit entry registered under reassigned IP %s", ip_addr)
                 
             if mac_addr in self._router_isolated_devices:
                 meta = self._router_isolated_devices[mac_addr]

@@ -291,7 +291,16 @@ check("a device with genuinely zero DNS footprint keeps the strong DNS_EVASION n
 # ═══════════════════════════════════════════════════════════════════════════════════
 with open(_PathForSysPath(__file__).resolve().parent.parent / "src" / "core" / "pipeline.py", "r", encoding="utf-8") as f:
     pipeline_src = f.read()
+from core.alert_attribution import attribute_alert_target as _attr  # noqa: E402
+from intelligence.hypotheses.evidence import Evidence as _V1Ev  # noqa: E402
 
+
+def _Ev(etype, domain):
+    return _V1Ev(type=etype, source="t", timestamp=1.0, device="d", value=1.0, domain=domain)
+
+
+# 2026-10-12: the per-signature attribution rules moved from pipeline.py to core/alert_attribution.py (full matrix:
+# tests/test_alert_attribution.py); the checks below exercise the rules there and the one call site here.
 # UPDATED (persistence-suffix fix): primary_sig can carry a " (persisted Ns)" suffix
 # once a signature escalates via the cross-cycle persistence mechanism, so every one of
 # these source-guard checks now targets primary_sig_base (the suffix-stripped value)
@@ -299,8 +308,8 @@ with open(_PathForSysPath(__file__).resolve().parent.parent / "src" / "core" / "
 # for the full incident this fixed.
 check("pipeline.py prefers a DNS_EVASION evidence's own flagged IP over the generic "
       "last-known dest_ip when building that alert's network_context",
-      'if primary_sig_base in ("DNS_EVASION", "DNS_ATTRIBUTION_GAP", "DNS_POLICY_BYPASS"):' in pipeline_src and
-      'if ev.type == "dns_evasion_anomaly" and ev.domain:' in pipeline_src)
+      "primary_sig_base, active_evidence" in pipeline_src and
+      _attr("DNS_EVASION", [_Ev("dns_evasion_anomaly", "198.51.100.7")]).dest_ip == "198.51.100.7")
 check("the alert_payload's destination_ip uses the corrected alert_dest_ip variable, "
       "not the raw generic dest_ip, for every alert (not just DNS_EVASION ones)",
       '"destination_ip": alert_dest_ip,' in pipeline_src)
@@ -316,8 +325,8 @@ check("the alert_payload's destination_ip uses the corrected alert_dest_ip varia
 # record_confirmed_threat() (the local confirmed-intel learning store).
 check("pipeline.py prefers a DNS_COVERT_TUNNELING evidence's own flagged domain over the "
       "generic 'most notable domain in the window' fallback",
-      'if primary_sig_base == "DNS_COVERT_TUNNELING":' in pipeline_src and
-      'if ev.type == "dns_tunnel_v2" and ev.domain:' in pipeline_src)
+      _attr("DNS_COVERT_TUNNELING", [_Ev("dns_tunnel_v2", "t.example")]).domain == "t.example" and
+      _attr("DNS_COVERT_TUNNELING", [_Ev("dns_rate", None)]).domain == "unknown")
 check("the alert_payload's queried_domain uses the corrected alert_target_domain variable, "
       "not the raw target_malicious_domain, for every alert",
       '"queried_domain": alert_target_domain,' in pipeline_src)
@@ -348,8 +357,7 @@ check("REGRESSION GUARD: no remaining use of the raw target_malicious_domain in 
 # nothing about a real coordinated threat; it was an attribution artifact.
 check("pipeline.py prefers a DGA_BOTNET_C2 evidence's own flagged domain over the "
       "generic 'most notable domain in the window' fallback, same as DNS_COVERT_TUNNELING",
-      'elif primary_sig_base == "DGA_BOTNET_C2":' in pipeline_src and
-      'if ev.type == "dns_dga_burst" and ev.domain:' in pipeline_src)
+      _attr("DGA_BOTNET_C2", [_Ev("dns_dga_burst", "q.example")]).domain == "q.example")
 
 # ═══════════════════════════════════════════════════════════════════════════════════
 # BUGFIX (found via a live alert): alert_dest_ip (a few lines above target_display's
@@ -496,8 +504,8 @@ check("a DoH bypass IP alongside a separate genuinely-unexplained IP still produ
 check("THE DEEPER FIX: alert_target_domain itself (the source field, not just the "
       "display variable) is now set to 'unknown' for DNS_EVASION -- no domain is "
       "attached where none exists, rather than the generic fallback leaking in",
-      'elif primary_sig_base in ("DNS_EVASION", "DNS_ATTRIBUTION_GAP", "DNS_POLICY_BYPASS"):\n'
-      '                                alert_target_domain = "unknown"' in pipeline_src)
+      all(_attr(n, [_Ev("dns_evasion_anomaly", "198.51.100.7")]).domain == "unknown"
+          for n in ("DNS_EVASION", "DNS_ATTRIBUTION_GAP", "DNS_POLICY_BYPASS")))
 
 
 if FAILURES:

@@ -215,7 +215,7 @@ DEFAULT_CONFIG = {
     # (train_fp_classifier.py) is scheduled separately
     # via autotune_enabled/autotune_schedule_cron below, not through this dict. Times below
     # (2:45am / every-4h-from-midnight-at-:45 / 6am) are chosen so no two jobs fire in the
-    # same hour as each other or as autotune_schedule_cron's 3am default.
+    # same hour as each other or as autotune_schedule_cron's 3:30am default.
     "scheduler": {
         # v16: the sole Layer-3 LLM review job (scripts/ollama_soc.py retired the same
         # release) — see config.yaml's own scheduled_jobs.scheduler.live_llm_review
@@ -230,7 +230,7 @@ DEFAULT_CONFIG = {
     # Weekly FP-classifier retrain. Defined here (W-06) so the scheduler, the health manager and the WebUI
     # all read the same default when a config file omits the key, instead of each using its own inline fallback.
     "autotune_enabled": True,
-    "autotune_schedule_cron": "0 3 * * *",
+    "autotune_schedule_cron": "30 3 * * *",    # after the nightly backtest (02:00) that gates promotions
     "autotune_max_runtime_minutes": 40,
     # Documented default (config_schema.py): Suricata batch scan of bursts is opt-in. fritzbox_capture.py already
     # used False; main.py / health_manager.py / recommendations.py used True inline (W-06).
@@ -242,6 +242,9 @@ DEFAULT_CONFIG = {
     "ips_router_enabled": False,   # Controls FastAPI Fritz!Box Hardware drop
     "ips_tarpit_enabled": True,    # Controls Layer-2 ARP Spoofing
     "interactive_blocking_enabled": False, # False = Autonomous Auto-Block, True = Require Telegram Approval
+    # Health manager: a job-specific "no success for longer than this" bound (hours), overriding twice its schedule
+    # interval. The backtest gates every autotune promotion (M3, 2026-10-12).
+    "health_manager_job_max_age_hours": {"backtest_job": 36},
     "operator_release_cooldown_seconds": 3600.0, # 1-Hour Cooldown Period
     "pihole_api_url": "http://pihole",
     "pihole_api_password": "",
@@ -371,6 +374,9 @@ class LiveConfig:
         # block another's (matches this class's own established non-fatal/caught
         # resilience pattern elsewhere).
         self._notify_cbs: list = []
+        # mechanism key -> the value it had when a LIVE ips_enabled=false override forced it off (restored when the
+        # override is lifted); see _enforce_live_ips_master_switch()
+        self._ips_forced_by_override: dict = {}
         self._last_loaded = 0.0
         self._watcher_active = False
 
@@ -577,6 +583,8 @@ class LiveConfig:
                     self._config[key] = baseline
                     reverted[key] = baseline
 
+        with self._lock:
+            applied.update(self._enforce_live_ips_master_switch())
         self._last_overrides_loaded = mtime if self._overrides_path.exists() else time.time()
         if applied:
             LOGGER.info("🔧 Applied %d autonomous config override(s): %s", len(applied), applied)
@@ -584,6 +592,31 @@ class LiveConfig:
             LOGGER.info("↩️ Reverted %d config override(s) removed from %s: %s", len(reverted), self._overrides_path, reverted)
         if applied or reverted:
             self._fire_notify({**reverted, **applied})
+
+    def _enforce_live_ips_master_switch(self) -> dict:
+        """Caller holds self._lock. `ips_enabled` set false by a LIVE override (the console's All settings writes
+        state/config_overrides.json) used to stop only DNS blocking: enforce_ips_master_switch() ran only on a
+        config.yaml / environment reload, and router isolation and the tarpit kept acting until a restart (found
+        2026-10-06). Same rule here: master switch off -> every mechanism off; back on -> each forced mechanism gets
+        the value it had before. Returns the keys it changed."""
+        changed = {}
+        if not bool(self._config.get("ips_enabled", True)):
+            for k in _IPS_MECHANISM_KEYS:
+                if self._config.get(k):
+                    self._ips_forced_by_override.setdefault(k, self._config[k])
+                    self._config[k] = False
+                    changed[k] = False
+            if changed:
+                LOGGER.warning("ips_enabled is false (live override): forcing %s off.", ", ".join(sorted(changed)))
+        elif self._ips_forced_by_override:
+            for k, v in self._ips_forced_by_override.items():
+                if self._config.get(k) != v:
+                    self._config[k] = v
+                    changed[k] = v
+            self._ips_forced_by_override.clear()
+            if changed:
+                LOGGER.info("ips_enabled is back on: restored %s.", changed)
+        return changed
 
     def revert_override(self, key: str, value) -> None:
         """Pushes `key` back to its config.yaml baseline value immediately, in-memory, in
@@ -611,8 +644,9 @@ class LiveConfig:
             changed = self._config.get(key) != value
             self._config[key] = value
             self._active_file_overrides.pop(key, None)
-        if changed:
-            self._fire_notify({key: value})
+            forced = self._enforce_live_ips_master_switch()
+        if changed or forced:
+            self._fire_notify({key: value, **forced})
 
     def start_watcher(self, interval: float = 5.0) -> None:
         if self._watcher_active:
@@ -668,6 +702,82 @@ class LiveConfig:
             return self._config[key]
 
 CONFIG = LiveConfig(DEFAULT_CONFIG, CONFIG_FILE)
+
+
+_CRON_FIELD_RANGES = ((0, 59), (0, 23), (1, 31), (1, 12), (0, 6))
+
+
+def _cron_problem(expr) -> "str | None":
+    """Why `expr` is not a schedule scripts/scheduler.py can run (it supports "*", "*/N", an exact number and comma
+    lists of those, five fields), or None."""
+    parts = str(expr or "").split()
+    if len(parts) != 5:
+        return f"'{expr}' needs 5 fields (minute hour day month weekday)"
+    for part, (lo, hi) in zip(parts, _CRON_FIELD_RANGES):
+        for sub in part.split(","):
+            if sub == "*":
+                continue
+            if sub.startswith("*/") and sub[2:].isdigit() and int(sub[2:]) > 0:
+                continue
+            if sub.isdigit() and lo <= int(sub) <= hi:
+                continue
+            return f"'{expr}': '{sub}' is not supported here (use *, */N or a number {lo}-{hi})"
+    return None
+
+
+def validate_config(config, gateway_ip: "str | None" = None) -> list:
+    """Startup / reload validation that says what is wrong instead of silently dropping it (MASTER_TODO Section I,
+    PRODUCT_READINESS_CHECKLIST §M, 2026-10-13: a mistyped home network was dropped by a bare `except ValueError`, and
+    a switched-on integration without its credentials only warned once). Returns [(severity, key, message)] with
+    severity "error" (a setting that cannot work as written) or "warning". `gateway_ip` (discovered, optional): when
+    the network's own router lies outside every configured home range, the home network is almost certainly not set.
+    Network-agnostic: nothing about any particular network is assumed."""
+    import ipaddress
+    problems = []
+    get = config.get
+    nets = []
+    for s in resolve_home_subnets(config):
+        try:
+            nets.append(ipaddress.ip_network(str(s), strict=False))
+        except ValueError:
+            problems.append(("error", "home_subnets", f"'{s}' is not an address range (for example 10.0.0.0/24); "
+                                                      "it is ignored, so devices in it count as outside the home"))
+    if not nets:
+        problems.append(("error", "home_subnets", "no valid home network is set: every device looks external"))
+    elif gateway_ip:
+        try:
+            gw = ipaddress.ip_address(gateway_ip)
+            if not any(gw.version == n.version and gw in n for n in nets):
+                problems.append(("warning", "home_subnets",
+                                 f"your router ({gateway_ip}) is outside the home network "
+                                 f"({', '.join(map(str, nets))}): the home network is probably not set for this network"))
+        except ValueError:
+            pass
+    for key in ("safe_ips", "honeypot_ips"):
+        for v in get(key, []) or []:
+            try:
+                ipaddress.ip_address(str(v).split("%", 1)[0])
+            except ValueError:
+                problems.append(("error", key, f"'{v}' is not an IP address; it is ignored"))
+    if bool(get("telegram_enabled", False)) and not (get("telegram_token") and get("telegram_chat_id")):
+        problems.append(("error", "telegram_enabled", "Telegram is on but its token or chat id is missing: "
+                                                      "no alert can be sent"))
+    if bool(get("ips_enabled", True)) and bool(get("ips_pihole_enabled", False)) and not get("pihole_api_url"):
+        problems.append(("error", "ips_pihole_enabled", "Pi-hole blocking is on but pihole_api_url is empty: "
+                                                       "no domain can be blocked"))
+    if bool(get("ips_enabled", True)) and bool(get("ips_router_enabled", False)) and not get("fritz_password"):
+        problems.append(("error", "ips_router_enabled", "router blocking is on but the router's password is missing: "
+                                                       "no device can be blocked at the router"))
+    for name, job in (get("scheduler", {}) or {}).items():
+        if isinstance(job, dict) and job.get("enabled", False):
+            why = _cron_problem(job.get("cron", ""))
+            if why:
+                problems.append(("error", f"scheduler.{name}", f"schedule {why}: the job never runs"))
+    if bool(get("autotune_enabled", True)):
+        why = _cron_problem(get("autotune_schedule_cron", ""))
+        if why:
+            problems.append(("error", "autotune_schedule_cron", f"schedule {why}: autotuning never runs"))
+    return problems
 
 
 def resolve_home_subnets(config) -> list:

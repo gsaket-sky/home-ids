@@ -346,6 +346,19 @@ class AlertManager:
                     msg_text = f"🔒 Hardware containment block approved for '{target}'."
                 else:
                     msg_text = f"⚠️ Block failed: HTTP {resp.status_code}"
+            elif action == "blockdomain":
+                # interactive mode (2026-10-12): `target` is the action_id of a "pending_domain_block" ledger entry
+                # (pipeline.py) -- the domain itself can be longer than a Telegram callback allows
+                ipc_url = f"http://127.0.0.1:{fastapi_port}/api/ipc/approve_domain_block"
+                resp = self.session.post(ipc_url, json={"target": target}, headers=headers, timeout=15.0)
+                if resp.status_code == 200:
+                    body = resp.json()
+                    msg_text = (f"🚫 Blocked '{body.get('domain', 'the domain')}'." if body.get("blocked")
+                                else f"⚠️ '{body.get('domain', 'the domain')}' could not be blocked -- see the IDS log.")
+                elif resp.status_code == 404:
+                    msg_text = "⚠️ This approval expired or was already used."
+                else:
+                    msg_text = f"⚠️ Block failed: HTTP {resp.status_code}"
             elif action == "immunize":
                 # PHASE 6 (closed-loop self-healing): `target` here is the action_id from a
                 # published alert's "🛡️ Mark False Positive" button (see pipeline.py's

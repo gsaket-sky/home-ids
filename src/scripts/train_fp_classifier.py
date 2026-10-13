@@ -794,6 +794,7 @@ def _collect_connection_abuse_corrections(state_dir: Path, muted_docs: list = No
     return counts
 
 
+REAL_OUTCOME_SOURCES = ("operator", "feed")     # what autotune may learn "this was a threat" from
 ARP_SWEEP_MIN_CORRECTED_SAMPLES = 2   # a device needs at least this many confirmed FPs
                                        # before its threshold gets raised automatically
 ARP_SWEEP_MIN_CONFIRMED_SAMPLES = 5   # ...and this many confirmed THREATS (zero
@@ -1089,14 +1090,19 @@ def _propose_and_promote(engine: AutotuneEngine, store: GraphStore, parameter: s
 
     try:
         pending = store._conn.execute(
-            "SELECT change_id FROM threshold_history WHERE parameter=? AND "
+            "SELECT change_id, proposed_at FROM threshold_history WHERE parameter=? AND "
             "device_id IS ? AND device_type IS ? AND promoted_at IS NULL AND rolled_back_at IS NULL "
             "ORDER BY proposed_at DESC LIMIT 1",
             (parameter, device_id, device_type),
         ).fetchone()
         if pending is not None:
-            confirm_run_id = _insert_confirmed_label_backtest_run(store, {"role": "confirming", **evidence_detail})
-            if engine.promote_change(pending["change_id"], confirm_run_id, now=now):
+            # Confirmed only by the REAL nightly backtest run after the proposal (2026-10-13; it used to insert its own
+            # passing row here, so these changes bypassed the backtest gate). None yet: stays pending.
+            confirm_run_id = engine.latest_real_backtest_run(float(pending["proposed_at"] or 0))
+            if confirm_run_id is None:
+                LOGGER.info(f"[AUTOTUNE] {parameter} change {pending['change_id']} stays pending: no nightly "
+                            f"backtest since it was proposed")
+            elif engine.promote_change(pending["change_id"], confirm_run_id, now=now):
                 LOGGER.info(f"[AUTOTUNE] Promoted pending change {pending['change_id']} for {parameter} "
                             f"(device_id={device_id}, device_type={device_type})")
     except Exception as exc:
@@ -1408,9 +1414,12 @@ def run_threshold_calibration(state_dir: Path, now: float = None) -> None:
                 # -- sum both names an arp_sweep-relevant confirmed threat can carry now (see
                 # _collect_connection_abuse_corrections()'s own comment for why PORT_SCAN is
                 # deliberately excluded).
-                confirmed_count = (
-                    cl_afpe.get_confirmed_count(device_id, signature="CONNECTION_ABUSE")
-                    + cl_afpe.get_confirmed_count(device_id, signature="INTERNAL_RECONNAISSANCE")
+                # Real outcomes only (2026-10-13): an operator's confirmation or a curated threat-intel feed match.
+                # The plain count also holds CL-AFPE's automatic confirmations (its own Stage-1 triggers, the HIGH /
+                # CRITICAL write), which lowered ARP thresholds on .94 from the engine's own guesses.
+                confirmed_count = sum(
+                    cl_afpe.get_confirmed_count(device_id, signature=sig, sources=REAL_OUTCOME_SOURCES)
+                    for sig in ("CONNECTION_ABUSE", "INTERNAL_RECONNAISSANCE")
                 ) if cl_afpe else 0
                 arp_sweep_evidence[device_id] = (corrected_count, confirmed_count)
                 dev_arp_sweep_default = _device_profile_default(

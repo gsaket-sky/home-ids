@@ -20,6 +20,7 @@ RECENT ARCHITECTURAL ADDITIONS:
 - ADDED (LOGGING): Comprehensive debug and lifecycle loggers added across all startup sequences.
 """
 
+import html
 import logging
 import signal
 import sys
@@ -547,6 +548,17 @@ def main():
             except Exception as exc:
                 suricata_status = f"❌ Failed ({exc})"
 
+            # -- Settings: what cannot work as written (config.validate_config; also the health component "config") --
+            try:
+                from config import validate_config
+                from argus.identity.discovery import default_gateway_ip
+                _problems = validate_config(CONFIG, default_gateway_ip())
+                config_line = ("✅ Checked" if not _problems else
+                               f"❌ {len(_problems)} problem(s): " + "; ".join(
+                                   html.escape(f"{k}: {m}") for _s, k, m in _problems[:4]))
+            except Exception as exc:
+                config_line = f"⚠️ Not checked ({html.escape(str(exc))})"
+
             msg_lines = [
                 "🚀 <b>Home-IDS NDR Platform Boot Complete</b>",
                 "",
@@ -557,12 +569,13 @@ def main():
                 f"• FP Validation Engine: {fp_status}",
                 f"• GeoIP Engine: {geoip_status}",
                 f"• IPS · Pi-hole: {pihole_line}",
-                f"• IPS · Router (Fritz!Box): {router_line}",
+                f"• IPS · Router: {router_line}",
                 f"• IPS · Layer-2 Tarpit: {tarpit_line}",
                 f"• Zeek/PiHole Collectors: {collectors_status}",
                 f"• FastAPI Webhook: {webhook_status}",
                 f"• Suricata (batch scan): {suricata_status}",
                 "• Master Pipeline: ✅ Initialized",
+                f"• Settings: {config_line}",
             ]
             
             try:

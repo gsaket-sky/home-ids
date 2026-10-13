@@ -39,9 +39,11 @@ NOW = 1_800_000_000.0
 
 
 def _insert_backtest(store, run_id, passed, at=NOW):
+    # a nightly backtest run: it ran the golden set (2026-10-13: only such a run confirms a promotion)
     store._conn.execute(
-        "INSERT INTO backtest_runs (run_id, started_at, finished_at, overall_pass) VALUES (?, ?, ?, ?)",
-        (run_id, at, at, 1 if passed else 0),
+        "INSERT INTO backtest_runs (run_id, started_at, finished_at, overall_pass, golden_set_result_json) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (run_id, at, at, 1 if passed else 0, '{"passed": %s}' % ("true" if passed else "false")),
     )
     store._maybe_commit()
 
@@ -652,8 +654,10 @@ notify_proposal_for_test = notify_engine_for_test.propose_change(
 check("set_notify test setup: the proposal itself was accepted",
       notify_proposal_for_test.accepted, f"got {notify_proposal_for_test}")
 
+# a later nightly run confirms (the proposal's own run never does -- 2026-10-13)
+_insert_backtest(notify_store, "bt_notify_confirm", passed=True, at=NOW + _DEFAULT_CANARY_SECONDS)
 promoted_for_notify_test = notify_engine_for_test.promote_change(
-    notify_proposal_for_test.change_id, "bt_notify", now=NOW + _DEFAULT_CANARY_SECONDS + 1,
+    notify_proposal_for_test.change_id, "bt_notify_confirm", now=NOW + _DEFAULT_CANARY_SECONDS + 1,
 )
 check("set_notify: promote_change() itself still succeeds even though ONE "
       "subscriber raises -- a notify failure must never look like the "

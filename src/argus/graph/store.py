@@ -17,7 +17,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from argus.evidence.model import Evidence, NO_DESTINATION
 from utils import is_local_or_multicast_destination
@@ -2371,20 +2371,23 @@ class GraphStore:
         ).fetchall()
         return {(r["device_id"], r["destination_id"]) for r in rows}
 
-    def get_decisions_since(self, since: float, until: Optional[float] = None) -> List[Dict[str, Any]]:
+    def get_decisions_since(self, since: float, until: Optional[float] = None,
+                            states: Optional[Iterable[str]] = None) -> List[Dict[str, Any]]:
         """Real decisions (A7) in [since, until) -- the divergence comparator's
         (A8) own read side. raw_payload is parsed back into a dict (stored as
-        JSON text, per insert_decision()); mechanism_flags likewise."""
+        JSON text, per insert_decision()); mechanism_flags likewise. `states` limits the rows in SQL (2026-10-13: the
+        LLM review loaded every decision of 24 h -- benign ones, one per device per cycle -- to keep the few it
+        reviews, in the 1 GB scheduler container); rows are parsed as they are read."""
+        clauses, params = ["timestamp >= ?"], [since]
         if until is not None:
-            rows = self._conn.execute(
-                "SELECT * FROM decisions WHERE timestamp >= ? AND timestamp < ? ORDER BY timestamp",
-                (since, until),
-            ).fetchall()
-        else:
-            rows = self._conn.execute(
-                "SELECT * FROM decisions WHERE timestamp >= ? ORDER BY timestamp",
-                (since,),
-            ).fetchall()
+            clauses.append("timestamp < ?")
+            params.append(until)
+        if states is not None:
+            states = list(states)
+            clauses.append(f"state IN ({','.join('?' * len(states))})")
+            params.extend(states)
+        rows = self._conn.execute(
+            f"SELECT * FROM decisions WHERE {' AND '.join(clauses)} ORDER BY timestamp", params)
         out = []
         for r in rows:
             d = dict(r)

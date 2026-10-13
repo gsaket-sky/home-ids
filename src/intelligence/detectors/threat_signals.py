@@ -100,7 +100,8 @@ class ThreatSignalDetector:
             return bool(ti_engine and ti_engine.is_allowlisted(domain))
 
         def add(etype: str, value: float, confidence: float, group: str, note: str,
-                subtag: Optional[str] = None, domain: Optional[str] = None) -> None:
+                subtag: Optional[str] = None, domain: Optional[str] = None,
+                targets=(), target_count: int = 0) -> None:
             # `subtag` is a STABLE category tag (e.g. "txt_null_abuse") distinct from the
             # free-text `note`, which contains cycle-to-cycle-varying numbers. Hypotheses
             # that need to count how many *distinct signal categories* fired (e.g.
@@ -115,7 +116,7 @@ class ThreatSignalDetector:
                 type=etype, source="threat_signals", timestamp=now, device=device,
                 value=value, confidence=max(0.0, min(1.0, confidence)),
                 independence_group=group, provenance=f"detector:threat_signals:{etype}:{tag}:{note}",
-                domain=domain,
+                domain=domain, targets=tuple(targets or ()), target_count=int(target_count or 0),
             ))
 
         # ── DGA / algorithmic-domain burst ──────────────────────────────────────────
@@ -401,7 +402,8 @@ class ThreatSignalDetector:
             rej_evidence_ip = rej_ip_examples[0] if rej_ip_examples else None
             if rej_ip_examples:
                 note += f"; e.g.={','.join(rej_ip_examples)}"
-            add("zeek_conn_abuse", s0_rej, conf, "zeek_network", note, domain=rej_evidence_ip)
+            add("zeek_conn_abuse", s0_rej, conf, "zeek_network", note, domain=rej_evidence_ip,
+                targets=rej_ip_examples, target_count=int(s0_rej_unique))
 
         # ── ARP host-discovery sweep (recon precursor) ───────────────────────────────
         # PHASE 21B: broadcast-visible, so this reaches WiFi devices the same way MAC
@@ -425,7 +427,8 @@ class ThreatSignalDetector:
             note = f"ARP-requested {int(arp_sweep_count)} distinct targets (host-discovery sweep)"
             if swept_examples:
                 note += f"; e.g.={','.join(swept_examples)}"
-            add("arp_sweep", arp_sweep_count, conf, "lan_recon", note, domain=rep_swept_ip)
+            add("arp_sweep", arp_sweep_count, conf, "lan_recon", note, domain=rep_swept_ip,
+                targets=swept_examples, target_count=int(arp_sweep_count))
 
         # ── Long-lived / covert-tunnel connections ───────────────────────────────────
         max_dur = float(features.get("zeek_max_duration", 0.0) or 0.0)

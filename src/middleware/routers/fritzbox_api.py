@@ -227,10 +227,14 @@ def _ipc_block_logic(target: str):
         
         dev_id = target
         matches = []
-        for id_str in sm.get_all_device_ids():
-            with sm.lock_device(id_str) as st:
-                if st.client_ip == target or st.mac_address == target:
-                    matches.append(id_str)
+        if sm.has_device(target):
+            # the Telegram "Approve" button names the device by id (containment T1, 2026-10-12)
+            matches = [target]
+        else:
+            for id_str in sm.get_all_device_ids():
+                with sm.lock_device(id_str) as st:
+                    if st.client_ip == target or st.mac_address == target:
+                        matches.append(id_str)
         # 2026-10-12: act only on a device identified exactly -- this used to take the FIRST device claiming the
         # address, so with two claimants it could block the wrong one (StateManager.identity_check).
         if len(matches) > 1:
@@ -251,6 +255,12 @@ def _ipc_block_logic(target: str):
         with sm.lock_device(dev_id) as state:
             state.has_validated_threat = True
             state.confirmed_threat_count = getattr(state, "confirmed_threat_count", 0) + 1
+        try:   # the operator approved isolating it: a confirmed threat autotune may learn from (2026-10-13)
+            from middleware.routers.pihole_api import _get_argus_cl_afpe_engine
+            _get_argus_cl_afpe_engine().record_operator_confirmation(dev_id)
+        except Exception as exc:
+            LOGGER.warning("Could not record the operator confirmation for %s: %s", dev_id, exc)
+        with sm.lock_device(dev_id) as state:
         
             ips.mitigate(
                 st=state,

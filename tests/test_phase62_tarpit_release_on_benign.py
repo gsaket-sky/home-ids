@@ -83,7 +83,7 @@ check("tarpit activation is decision-driven (risk_score>=9.0 or lateral_threat),
 check("release_device() already exists and releases tarpit targets specifically "
       "(not just router isolation/Pi-hole)",
       "def release_device(self, identifier: str) -> bool:" in _ips_src
-      and "del self._tarpit_active_targets[ip]" in _ips_src)
+      and "self._pop_tarpit_entries(self._tarpit_keys_for(dev_ids, macs))" in _ips_src)
 
 check("release_device() ALSO releases router isolation and Pi-hole blocks in the "
       "same call -- confirms it's the correct single entry point to reuse, not one "

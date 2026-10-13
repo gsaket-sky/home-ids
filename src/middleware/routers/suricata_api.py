@@ -66,7 +66,8 @@ def _summarize(rec: Dict[str, Any]) -> Dict[str, Any]:
         "device_id": device.get("id", "unknown"),
         "hostname": device.get("hostname", "unknown"),
         "device_ip": device.get("ip", "unknown"),
-        "target": net.get("destination_ip") or net.get("queried_domain") or "unknown",
+        "target": next((str(v) for v in (net.get("destination_ip"), net.get("queried_domain"))
+                        if v and str(v) != "unknown"), "unknown"),
         "risk": rec.get("risk"),
         "state": rec.get("state"),
         "matches": matches,

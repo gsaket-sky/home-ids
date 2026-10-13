@@ -1,5 +1,5 @@
 """
-release_device.py – CLI Utility to Release Isolated Devices from Tarpit & Fritz!Box WAN Block.
+release_device.py – CLI Utility to Release Isolated Devices from Tarpit & Router Internet Block.
 
 Usage:
   python src/release_device.py <IP_OR_MAC_OR_HOSTNAME>
@@ -66,14 +66,14 @@ def main():
         print("[*] Attempting operator release for ALL isolated devices...")
         count = ips.release_all_devices()
         state_manager.flush_to_disk()
-        print(f"✅ Successfully released {count} device(s) from Layer-2 tarpit, Fritz!Box hardware isolation & Pi-hole DNS blocks.")
+        print(f"✅ Successfully released {count} device(s) from the Layer-2 tarpit, router isolation & Pi-hole DNS blocks.")
         print("[*] All devices are re-connected and REMAIN 100% MONITORED under active IDS threat detection.")
     else:
         print(f"[*] Attempting operator release for identifier: {target}...")
         released = ips.release_device(target)
         if released:
             state_manager.flush_to_disk()
-            print(f"✅ Successfully released device '{target}' from Layer-2 tarpit, Fritz!Box hardware isolation & Pi-hole DNS blocks.")
+            print(f"✅ Successfully released device '{target}' from the Layer-2 tarpit, router isolation & Pi-hole DNS blocks.")
             print("[*] Device is now re-connected and REMAINS 100% MONITORED under active IDS threat detection.")
         else:
             print(f"⚠️ Target '{target}' was not found in active tarpit or router isolation lists.")

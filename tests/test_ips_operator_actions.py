@@ -98,7 +98,7 @@ def test_operator_tarpit_success_registers_state(mitigator):
     ok, reason = mitigator.operator_tarpit("dev1", "10.0.0.5", "aa:bb:cc:dd:ee:ff", "host1")
     assert ok is True
     assert "Tarpitted" in reason
-    assert "10.0.0.5" in mitigator._tarpit_active_targets
+    assert "dev:dev1" in mitigator._tarpit_active_targets
 
 
 def test_operator_tarpit_idempotent(mitigator):
@@ -147,7 +147,7 @@ def test_unisolate_all_clears_tarpit_without_router_webhook(mitigator, monkeypat
     monkeypatch.setattr(mitigator, "_unisolate_device_router", lambda **kw: calls.append(kw) or True)
     mitigator.unisolate_all(mac_addr="aa:bb:cc:dd:ee:ff", ip_addr="10.0.0.5")
     assert calls == []
-    assert "10.0.0.5" not in mitigator._tarpit_active_targets
+    assert "dev:dev1" not in mitigator._tarpit_active_targets
 
 
 # --- _arm_tarpit_for_dual_stack_coverage / router-agnostic IPv6 device-identity plan
@@ -166,8 +166,8 @@ def test_arm_tarpit_for_dual_stack_coverage_registers_target(mitigator):
         client_ip="10.0.0.5", mac_addr="aa:bb:cc:dd:ee:ff", hostname="host1",
         dev_id="dev1", reason="test")
     assert armed is True
-    assert "10.0.0.5" in mitigator._tarpit_active_targets
-    assert mitigator._tarpit_active_targets["10.0.0.5"]["mac"] == "aa:bb:cc:dd:ee:ff"
+    assert "dev:dev1" in mitigator._tarpit_active_targets
+    assert mitigator._tarpit_active_targets["dev:dev1"]["macs"] == ["aa:bb:cc:dd:ee:ff"]   # keyed by device (T1)
 
 
 def test_arm_tarpit_for_dual_stack_coverage_idempotent(mitigator):
@@ -185,7 +185,7 @@ def test_arm_tarpit_for_dual_stack_coverage_respects_opt_out(mitigator):
     armed = mitigator._arm_tarpit_for_dual_stack_coverage(
         client_ip="10.0.0.5", mac_addr="aa:bb:cc:dd:ee:ff", hostname="host1", dev_id="dev1", reason="t")
     assert armed is False
-    assert "10.0.0.5" not in mitigator._tarpit_active_targets
+    assert "dev:dev1" not in mitigator._tarpit_active_targets
 
 
 def test_arm_tarpit_for_dual_stack_coverage_respects_tarpit_disabled(mitigator):
@@ -194,7 +194,7 @@ def test_arm_tarpit_for_dual_stack_coverage_respects_tarpit_disabled(mitigator):
     armed = mitigator._arm_tarpit_for_dual_stack_coverage(
         client_ip="10.0.0.5", mac_addr="aa:bb:cc:dd:ee:ff", hostname="host1", dev_id="dev1", reason="t")
     assert armed is False
-    assert "10.0.0.5" not in mitigator._tarpit_active_targets
+    assert "dev:dev1" not in mitigator._tarpit_active_targets
 
 
 def test_arm_tarpit_for_dual_stack_coverage_needs_l2_or_simulation(mitigator, monkeypatch):
@@ -215,7 +215,7 @@ def test_arm_tarpit_for_dual_stack_coverage_needs_mac(mitigator):
     armed = mitigator._arm_tarpit_for_dual_stack_coverage(
         client_ip="10.0.0.5", mac_addr="unknown", hostname="host1", dev_id="dev1", reason="t")
     assert armed is False
-    assert "10.0.0.5" not in mitigator._tarpit_active_targets
+    assert "dev:dev1" not in mitigator._tarpit_active_targets
 
 
 def test_operator_isolate_router_also_arms_tarpit(mitigator, monkeypatch):
@@ -226,7 +226,7 @@ def test_operator_isolate_router_also_arms_tarpit(mitigator, monkeypatch):
     ok, reason = mitigator.operator_isolate_router("dev1", "10.0.0.5", "aa:bb:cc:dd:ee:ff", "host1")
     assert ok is True
     assert "tarpit armed" in reason.lower()
-    assert "10.0.0.5" in mitigator._tarpit_active_targets
+    assert "dev:dev1" in mitigator._tarpit_active_targets
 
 
 def test_operator_isolate_router_message_stays_honest_when_tarpit_not_armed(mitigator, monkeypatch):
@@ -236,8 +236,8 @@ def test_operator_isolate_router_message_stays_honest_when_tarpit_not_armed(miti
     monkeypatch.setattr(mitigator, "_isolate_device_router", lambda **kw: True)
     ok, reason = mitigator.operator_isolate_router("dev1", "10.0.0.5", "aa:bb:cc:dd:ee:ff", "host1")
     assert ok is True
-    assert reason == "Isolated via Fritz!Box."
-    assert "10.0.0.5" not in mitigator._tarpit_active_targets
+    assert reason == "Isolated via the router."
+    assert "dev:dev1" not in mitigator._tarpit_active_targets
 
 
 def test_mitigate_autonomous_router_isolation_now_also_arms_tarpit(mitigator, monkeypatch):
@@ -252,7 +252,7 @@ def test_mitigate_autonomous_router_isolation_now_also_arms_tarpit(mitigator, mo
     mitigator.mitigate(st, target_domain="unknown", risk_score=8.7, lateral_threat=False,
                         is_safe=False, decision_state="HIGH")
     assert "aa:bb:cc:dd:ee:ff" in mitigator._router_isolated_devices
-    assert "10.0.0.5" in mitigator._tarpit_active_targets, (
+    assert "dev:dev1" in mitigator._tarpit_active_targets, (
         "risk 8.7 is below tarpit's own 9.0 bar -- this only passes because router "
         "isolation's success now ALSO arms the tarpit directly, closing the IPv6 gap")
 
@@ -267,7 +267,7 @@ def test_mitigate_below_router_threshold_arms_neither(mitigator, monkeypatch):
     mitigator.mitigate(st, target_domain="unknown", risk_score=5.0, lateral_threat=False,
                         is_safe=False, decision_state="SUSPICIOUS")
     assert "aa:bb:cc:dd:ee:ff" not in mitigator._router_isolated_devices
-    assert "10.0.0.5" not in mitigator._tarpit_active_targets
+    assert "dev:dev1" not in mitigator._tarpit_active_targets
 
 
 def test_mitigate_respects_tarpit_follows_router_isolation_opt_out(mitigator, monkeypatch):
@@ -279,7 +279,7 @@ def test_mitigate_respects_tarpit_follows_router_isolation_opt_out(mitigator, mo
     mitigator.mitigate(st, target_domain="unknown", risk_score=8.7, lateral_threat=False,
                         is_safe=False, decision_state="HIGH")
     assert "aa:bb:cc:dd:ee:ff" in mitigator._router_isolated_devices  # router isolation itself unaffected
-    assert "10.0.0.5" not in mitigator._tarpit_active_targets  # coupling opted out
+    assert "dev:dev1" not in mitigator._tarpit_active_targets  # coupling opted out
 
 
 # --- get_containment_status(): combined badge when both mechanisms are active -----

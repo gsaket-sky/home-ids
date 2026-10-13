@@ -44,6 +44,7 @@ def check(name, cond, detail=""):
 # ═══════════════════════════════════════════════════════════════════════════════════
 # Section A: zeek_features.py -- zeek_lateral_unique_targets counts DISTINCT targets
 # ═══════════════════════════════════════════════════════════════════════════════════
+from core.alert_attribution import attribute_alert_target as _attr  # 2026-10-12: attribution rules
 from extractors.zeek_features import ZeekFeatureExtractor
 
 SRC = "192.168.1.12"
@@ -358,11 +359,13 @@ check("THE FIX: the alert-building side also got a 'Confirmed Malicious IOC' bra
       "(matching decision_engine.py's exact tier-5 explanation string, now broadened to "
       "all four reputation-tier explanation strings) so the alert displays/records the "
       "real reputation_target, not target_malicious_domain",
-      '"Confirmed Malicious IOC",' in pipeline_src and "reputation_target" in pipeline_src)
+      # 2026-10-12: the rule lives in core/alert_attribution.py; pipeline.py passes reputation_target to it.
+      "reputation_target=reputation_target" in pipeline_src and
+      _attr("Confirmed Malicious IOC", [], reputation_target="bad.example").domain == "bad.example")
 check("THE FIX: that branch correctly routes an IP-shaped reputation_target to "
       "alert_dest_ip (not alert_target_domain) -- abuse_risk/vt_risk's IP-only "
       "signals produce an IP, not a domain",
-      "ipaddress.ip_address(reputation_target)" in pipeline_src and "alert_dest_ip = reputation_target" in pipeline_src)
+      _attr("Corroborated Reputation Signal", [], reputation_target="203.0.113.9").dest_ip == "203.0.113.9")
 
 # Mirror the actual attribution logic (the real code has side effects -- API enqueue
 # calls -- not practical to exercise directly in a unit test) to prove the priority
@@ -605,20 +608,10 @@ check("THE CORE FIX: DGA_BOTNET_C2 strips correctly",
 # raw (potentially-suffixed) primary_sig.
 check("SOURCE-GUARD: primary_sig_base is derived via the persisted-suffix split",
       'primary_sig_base = primary_sig.split(" (persisted ", 1)[0]' in _pipeline_src)
-check("SOURCE-GUARD: the DNS_EVASION dest-IP branch keys off primary_sig_base",
-      'if primary_sig_base in ("DNS_EVASION", "DNS_ATTRIBUTION_GAP", "DNS_POLICY_BYPASS"):' in _pipeline_src)
-check("SOURCE-GUARD: the DNS_COVERT_TUNNELING branch keys off primary_sig_base",
-      'if primary_sig_base == "DNS_COVERT_TUNNELING":' in _pipeline_src)
-check("SOURCE-GUARD: the DGA_BOTNET_C2 branch keys off primary_sig_base",
-      'elif primary_sig_base == "DGA_BOTNET_C2":' in _pipeline_src)
-check("SOURCE-GUARD: the DNS_EVASION target-domain branch keys off primary_sig_base",
-      'elif primary_sig_base in ("DNS_EVASION", "DNS_ATTRIBUTION_GAP", "DNS_POLICY_BYPASS"):' in _pipeline_src)
-# STALE-TEST FIX (2026-09-28): see the matching comment above this same check earlier in
-# this file -- the single-string elif was broadened into a 4-string tuple by a later fix
-# (commit a074dd2). Checks the tuple form actually keys off primary_sig_base, not the
-# raw (potentially-suffixed) primary_sig, which is what this guard actually cares about.
-check("SOURCE-GUARD: the Confirmed Malicious IOC branch keys off primary_sig_base",
-      'elif primary_sig_base in (' in _pipeline_src and '"Confirmed Malicious IOC",' in _pipeline_src)
+# 2026-10-12: every per-signature attribution rule moved to core/alert_attribution.py; its one call site passes
+# primary_sig_base (the suffix-stripped signature), so every rule keys off it.
+check("SOURCE-GUARD: alert attribution is called with primary_sig_base",
+      "attribute_alert_target(\n                                primary_sig_base, active_evidence" in _pipeline_src)
 check("SOURCE-GUARD: target_display's DNS_EVASION preference keys off primary_sig_base",
       "primary_sig_base in (\"DNS_EVASION\", \"DNS_ATTRIBUTION_GAP\", \"DNS_POLICY_BYPASS\") and alert_dest_ip and alert_dest_ip != \"unknown\"" in _pipeline_src)
 check("SOURCE-GUARD: the repeat-suppression cadence gate keys off primary_sig_base, "

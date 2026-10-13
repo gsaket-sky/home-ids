@@ -138,6 +138,38 @@ def attach_ns_filter(sock: socket.socket) -> bool:
         return False
 
 
+MAX_SRC_FILTER_MACS = 60     # each MAC is 4 instructions; a BPF conditional jump reaches at most 255 ahead
+
+
+def src_mac_filter_program(macs) -> list:
+    """Classic BPF: accept a frame whose Ethernet source is one of `macs`, drop everything else (an empty list drops
+    all). Used by the containment observer (IPSMitigator) so Python sees only contained devices' frames."""
+    macs = [m for m in macs if m][:MAX_SRC_FILTER_MACS]
+    prog = []
+    for i, mac in enumerate(macs):
+        b = mac_bytes(mac)
+        hi, lo = struct.unpack("!IH", b)
+        rest = len(macs) - i - 1
+        prog += [(0x20, 0, 0, 6),                  # ld word [6]  (source MAC, bytes 0-3)
+                 (0x15, 0, 2, hi),                 # jeq hi ? next : skip this MAC's last two
+                 (0x28, 0, 0, 10),                 # ldh [10]     (source MAC, bytes 4-5)
+                 (0x15, 4 * rest + 1, 0, lo)]      # jeq lo ? accept : next MAC
+    return prog + [(0x06, 0, 0, 0), (0x06, 0, 0, 0x40000)]
+
+
+def attach_filter(sock: socket.socket, program: list) -> bool:
+    """Attaches a classic BPF program; False when the platform refuses (the caller then filters in Python)."""
+    try:
+        prog = b"".join(struct.pack("HBBI", *ins) for ins in program)
+        buf = ctypes.create_string_buffer(prog)
+        fprog = struct.pack("HL", len(program), ctypes.addressof(buf))
+        sock.setsockopt(socket.SOL_SOCKET, SO_ATTACH_FILTER, fprog)
+        return True
+    except (OSError, AttributeError, ValueError) as exc:
+        LOGGER.debug("BPF filter not attached (%s); filtering in Python", exc)
+        return False
+
+
 # ---- sockets / interfaces ---------------------------------------------------------------------
 def open_raw(proto: int = ETH_P_ALL) -> socket.socket:
     return socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(proto))

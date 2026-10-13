@@ -102,8 +102,11 @@ def test_contained_orphan_extends_containment_to_the_canonical(tmp_path):
     # (dual-stack coverage), so the tarpit step may report "already tarpitted" and `added` lists only the router.
     assert "router" in added and set(added) <= {"router", "tarpit"}
     assert m._router_isolated_devices[CANON_MAC]["dev_id"] == "canon"
-    assert m._tarpit_active_targets[CANON_IP]["dev_id"] == "canon"
-    assert ORPHAN_MAC in m._router_isolated_devices and ORPHAN_IP in m._tarpit_active_targets   # never released
+    # containment T1: keyed by device; the canonical's entry acts on its own MAC, the orphan's entry stays until the
+    # state relabels it (StateManager.merge_into_canonical) -- never released
+    t = m._tarpit_active_targets
+    assert t["dev:canon"]["dev_id"] == "canon" and CANON_MAC.lower() in t["dev:canon"]["macs"]
+    assert ORPHAN_MAC in m._router_isolated_devices and "dev:orph" in t
 
 
 def test_uncontained_orphan_adds_nothing(tmp_path):
@@ -217,7 +220,7 @@ def test_backtest_decision_lookups_cover_earlier_ids(store):
     store.insert_decision("canon", 500.0, "SUSPICIOUS", "test", 0.5, 0.5)
     store.upsert_device("orph", timestamp=1.0)
     store.merge_device("orph", "canon", timestamp=10.0)
-    rows = _decision_rows(store, "decision_id", "orph", "AND timestamp > ?", (100.0,))
+    rows = list(_decision_rows(store, "decision_id", "orph", "AND timestamp > ?", (100.0,)))  # a cursor now (streamed)
     assert len(rows) == 1                       # evidence under the old id finds the decision under the new one
     assert sorted(_with_merged_ids(store, ["canon"])) == ["canon", "orph"]
 

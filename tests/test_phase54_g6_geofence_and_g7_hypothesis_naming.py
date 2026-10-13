@@ -188,15 +188,24 @@ check("REGRESSION GUARD: lateral scan alongside OTHER corroborating evidence sti
 # ═══════════════════════════════════════════════════════════════════════════════════
 _pipeline_src = (_PathForSysPath(__file__).resolve().parent.parent / "src" / "core" / "pipeline.py").read_text(encoding="utf-8")
 
+# 2026-10-12: the per-signature attribution rules moved to core/alert_attribution.py (tests/test_alert_attribution.py
+# has the full matrix); the same three widenings, checked there.
+from core.alert_attribution import attribute_alert_target as _attr  # noqa: E402
+_sweep = Evidence(type="arp_sweep", source="t", timestamp=1.0, device="d", value=9.0, domain="10.0.0.2",
+                  targets=("10.0.0.2", "10.0.0.3"), target_count=9)
 check("pipeline.py's CONNECTION_ABUSE attribution branch widened to also catch "
       "PORT_SCAN/INTERNAL_RECONNAISSANCE",
-      'primary_sig_base in ("CONNECTION_ABUSE", "PORT_SCAN", "INTERNAL_RECONNAISSANCE")' in _pipeline_src)
+      all(_attr(n, [_sweep]).target_set == {"kind": "swept_hosts", "count": 9, "examples": ["10.0.0.2", "10.0.0.3"]}
+          for n in ("CONNECTION_ABUSE", "PORT_SCAN", "INTERNAL_RECONNAISSANCE")))
+_notice = Evidence(type="malicious_ja3", source="t", timestamp=1.0, device="d", value=1.0, domain="203.0.113.4")
 check("pipeline.py's NETWORK_INTRUSION attribution branch widened to also catch "
       "LATERAL_MOVEMENT",
-      'primary_sig_base in ("NETWORK_INTRUSION", "LATERAL_MOVEMENT")' in _pipeline_src)
+      all(_attr(n, [_notice]).dest_ip == "203.0.113.4" for n in ("NETWORK_INTRUSION", "LATERAL_MOVEMENT")))
+_geo = Evidence(type="geofencing_violation", source="t", timestamp=1.0, device="d", value=1.0, domain="203.0.113.5")
 check("pipeline.py's Geofencing attribution branch widened to also catch the "
       "'(Uncorroborated)' suffix variant",
-      'primary_sig_base in ("Geofencing Policy Violation", "Geofencing Policy Violation (Uncorroborated)")' in _pipeline_src)
+      all(_attr(n, [_geo]).dest_ip == "203.0.113.5"
+          for n in ("Geofencing Policy Violation", "Geofencing Policy Violation (Uncorroborated)")))
 check("pipeline.py's WHY block now labels each evidence line with its family name "
       "(zip(why_families, why_lines))",
       "zip(why_families, why_lines)" in _pipeline_src)
@@ -212,7 +221,9 @@ check("train_fp_classifier.py's arp-sweep-correction collector widened to also c
       'signature") not in ("CONNECTION_ABUSE", "INTERNAL_RECONNAISSANCE")' in _train_src)
 check("train_fp_classifier.py's confirmed-count lookup sums both CONNECTION_ABUSE and "
       "INTERNAL_RECONNAISSANCE signature keys",
-      'signature="CONNECTION_ABUSE"' in _train_src and 'signature="INTERNAL_RECONNAISSANCE"' in _train_src)
+      # 2026-10-13: both names, counted from real outcomes only (operator / curated feed)
+      'for sig in ("CONNECTION_ABUSE", "INTERNAL_RECONNAISSANCE")' in _train_src
+      and "sources=REAL_OUTCOME_SOURCES" in _train_src)
 
 print()
 if FAILURES:

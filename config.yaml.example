@@ -940,7 +940,10 @@ scheduled_jobs:
   # dict below, it has its own dedicated enable/cron pair. Fires at 3am.
   # The engine reloads the new model by itself when the file changes. [LIVE]
   autotune_enabled: true
-  autotune_schedule_cron: "0 3 * * *"
+  # 03:30 -- AFTER the nightly backtest (02:00), whose pass gates every autotune promotion; the night jobs share one
+  # slot, so they are spread an hour apart in their logical order: cleanup 01:00/01:30, backtest 02:00, retro hunt
+  # 02:45 (unchanged), autotune 03:30 (2026-10-13: four jobs used to start between 03:00 and 03:30).
+  autotune_schedule_cron: "30 3 * * *"
   autotune_priority: 2
   autotune_pausable: true
   autotune_max_runtime_minutes: 40
@@ -992,7 +995,7 @@ scheduled_jobs:
     # "script" override below.
     live_prune:
       enabled: true
-      cron: "15 3 * * *"
+      cron: "0 1 * * *"
       script: "../argus/ops/live_prune.py"
       priority: 1  # highest urgency -- unbounded evidence-table growth is a real, already-seen failure mode without it
       pausable: false  # wraps its whole ~120s SELECT+chunked-DELETE in ONE transaction -- SIGSTOP risks holding the write lock past the live engine's own 10s busy_timeout
@@ -1008,7 +1011,7 @@ scheduled_jobs:
     # configured budget at the default retention windows.
     disk_budget_governor:
       enabled: true
-      cron: "30 3 * * *"
+      cron: "30 1 * * *"
       script: "../argus/ops/disk_budget_governor.py"
       priority: 1
       pausable: false  # same reasoning as live_prune -- SIGSTOP mid-trim risks holding the write lock
@@ -1084,16 +1087,16 @@ scheduled_jobs:
     # golden set, zero tolerance, + Sheet 01's synthetic attack-injection
     # sweep) whose pass/fail is Sheet 03a's autotuner's own gate: propose_
     # change() refuses to even create a threshold_history proposal without a
-    # passing backtest_run_id (v13/autotune/engine.py). 3:30am -- clear of
-    # autotune_schedule_cron (3am) and live_prune (3:15am), the two nearest
-    # neighbors in this file. Lives in src/v13/ops/, not scripts/, hence the
+    # passing backtest_run_id (v13/autotune/engine.py). 2:00am -- after the cleanup
+    # jobs (1:00/1:30) and before autotune_schedule_cron (3:30), which needs this
+    # night's result. Lives in src/v13/ops/, not scripts/, hence the
     # "script" override below (same pattern as every other v13/ops/ job here).
     # Previously NOT wired here at all (backtest_job.py's own module
     # docstring flagged this as real, separate follow-up work) -- this entry
     # closes that gap.
     backtest_job:
       enabled: true
-      cron: "30 3 * * *"
+      cron: "0 2 * * *"
       script: "../argus/ops/backtest_job.py"
       priority: 2
       pausable: false  # NOT yet audited for transaction-wrapping -- this is the exact job implicated in the historical overlap-OOM incident with population_prior_builder (see this file's own scheduled_jobs docstring); review its DB usage before ever flipping this to true

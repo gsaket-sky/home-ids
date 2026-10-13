@@ -138,6 +138,16 @@ def _is_independent_confirmation(stage1_triggers: List[str]) -> bool:
     return any(not str(t).startswith(LOCAL_INTEL_TRIGGER_PREFIX) for t in stage1_triggers or [])
 
 
+TI_FEED_TRIGGER_PREFIX = "ThreatIntel IOC match"
+
+
+def _confirmation_source(stage1_triggers: List[str]) -> str:
+    """"feed" when a curated threat-intel feed named the destination (a Stage-1 IOC match), else "automatic" -- the
+    engine's own judgement (heuristics, crowd-sourced reputation, its own hard stops). Autotune learns tightening only
+    from "feed" and "operator" (2026-10-13)."""
+    return "feed" if any(str(t).startswith(TI_FEED_TRIGGER_PREFIX) for t in stage1_triggers or []) else "automatic"
+
+
 def _dest_port_for(features: Optional[dict], dest_ip: Optional[str]) -> Optional[int]:
     """The port of the device's last connection, if that connection went to `dest_ip` (Zeek's
     last_dest_ip / last_dest_port); otherwise unknown. Feeds the VPN-tunnel guard in
@@ -677,7 +687,7 @@ class ClAfpeEngine:
     def record_confirmed_threat(self, device_id: str, base_domain: Optional[str], dest_ip: Optional[str],
                                   reason: str, asn_owner: str = "",
                                   ttl_seconds: Optional[float] = None, signature: str = "",
-                                  dest_port: Optional[int] = None) -> None:
+                                  dest_port: Optional[int] = None, source: str = "automatic") -> None:
         """Matches record_confirmed_threat() exactly (lines 967-1037): the write
         path into the shared LocalConfirmedIntel store, so a DIFFERENT device
         touching the same IOC later gets an immediate hard-stop via
@@ -708,9 +718,14 @@ class ClAfpeEngine:
         except Exception:
             # A bookkeeping failure here must never take down the confirmed-threat verdict.
             LOGGER.exception("Failed to record confirmed intel (non-fatal)")
-        self._increment_confirmed_count(device_id, signature)
+        self._increment_confirmed_count(device_id, signature, source=source)
 
-    def _increment_confirmed_count(self, device_id: str, signature: str = "") -> None:
+    def record_operator_confirmation(self, device_id: str, signature: str = "") -> None:
+        """A person said this alert was a real threat (Telegram "real threat", an approved isolation or domain block).
+        Counted as an operator outcome; nothing is written to the confirmed-intel store."""
+        self._increment_confirmed_count(device_id, signature, source="operator")
+
+    def _increment_confirmed_count(self, device_id: str, signature: str = "", source: str = "automatic") -> None:
         """How often this device was confirmed malicious, overall and per signature (graph metadata
         `confirmed_threat_counts`) -- the nightly calibration weighs corrections against it."""
         if not device_id or device_id == "unknown":
@@ -720,14 +735,26 @@ class ClAfpeEngine:
             counts["_total"] = int(counts.get("_total", 0)) + 1
             if signature:
                 counts[signature] = int(counts.get(signature, 0)) + 1
+            # by source too ("@operator:", "@feed:", "@automatic:" + _total / signature), in the same dict so a device
+            # merge sums them like every other count (GraphStore _MERGED_COUNT_DICTS) -- 2026-10-13
+            src = f"@{source or 'automatic'}:"
+            counts[src + "_total"] = int(counts.get(src + "_total", 0)) + 1
+            if signature:
+                counts[src + signature] = int(counts.get(src + signature, 0)) + 1
             self.store.update_device_metadata(device_id, {"confirmed_threat_counts": counts})
         except Exception:
             LOGGER.exception("Failed to increment the confirmed-threat count (non-fatal)")
 
-    def get_confirmed_count(self, device_id: str, signature: str = "") -> int:
+    def get_confirmed_count(self, device_id: str, signature: str = "", sources=None) -> int:
+        """How often the device was confirmed malicious (per signature, or overall). `sources` limits it to
+        confirmations from those sources ("operator", "feed", "automatic"); counted by source since 2026-10-13, so
+        earlier confirmations count only in the plain total."""
         try:
             counts = self.store.get_device_metadata(device_id).get("confirmed_threat_counts") or {}
-            return int(counts.get(signature or "_total", 0))
+            key = signature or "_total"
+            if sources is None:
+                return int(counts.get(key, 0))
+            return sum(int(counts.get(f"@{s}:{key}", 0)) for s in sources)
         except Exception:
             return 0
 
@@ -946,6 +973,7 @@ class ClAfpeEngine:
                         base_domain if self._is_domain_causal_hard_stop(stage1_triggers) else None,
                         dest_ip, reason="TRUST_CACHE_OVERRIDDEN_BY_HARD_STOP", asn_owner=asn_owner,
                         signature=alert_hypothesis, dest_port=_dest_port_for(features, dest_ip),
+                        source=_confirmation_source(stage1_triggers),
                     )
                 return {
                     "verdict": CONFIRMED_THREAT if independent else PREVIOUSLY_FLAGGED, "confidence": 0.0,
@@ -974,7 +1002,7 @@ class ClAfpeEngine:
                     device_id,
                     base_domain if self._is_domain_causal_hard_stop(stage1_triggers) else None,
                     dest_ip, reason="STAGE_1_HARD_STOP", asn_owner=asn_owner, signature=alert_hypothesis,
-                    dest_port=_dest_port_for(features, dest_ip),
+                    dest_port=_dest_port_for(features, dest_ip), source=_confirmation_source(stage1_triggers),
                 )
             return {
                 # Only the local confirmed-intel match fired: another device's earlier confirmation. Still never
