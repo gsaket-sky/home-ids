@@ -1,5 +1,5 @@
 {
- "commit": "956cf14bf248e1de529136077f985203c3ffca63",
+ "commit": "01456c1a2bd0485ab759c36d358357453c073f0b",
  "files": {
   ".env.example": "07072b6d8853462a1a80d365d21dca153e1a38a04f2e277dd3e25b0ed38c03de",
   "config.yaml.example": "33f62a4b929a60d752cc57a97bd88d2cd1a2cf6ba5c1d1fe2f86955678e1233f",
@@ -142,7 +142,7 @@
   "src/mitigation/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
   "src/mitigation/alerts.py": "d2434ad452af4acaa255719e5aa21a5d7395d838712a8e26e48d5ee0811c08f9",
   "src/mitigation/containment.py": "39e680c052fe175ea6cff35ad9a385b79bced3804abfe134934e73cce2a55823",
-  "src/mitigation/ips.py": "d04a4a60e586e6324e729c756539bc762b5ffc4245803d58bf40e7cb4821d511",
+  "src/mitigation/ips.py": "4f23e5e5a59fee3afceb6e66344d1ea1291f70a8d595c6eac1295de8442d5404",
   "src/mitigation/l2_enforcer.py": "413dc08002f7760dc4b05c6b4c486e9aed4affbfc1ac99920f98977011d7b8a2",
   "src/mitigation/l2_raw.py": "71ffbbe34bd0c7c32f4c4117971f38896983636db2e751f991cdc8584a9b6180",
   "src/mitigation/nftables_fw.py": "a3e9a5961773b0b87c67a0a814ac77cee78f0186cf5ce70b1494147ca0c303cb",
@@ -220,6 +220,7 @@
   "tests/test_config_ips_master_switch_live.py": "7a4e2fd11e159c5aee3d08ef747681809f41db39ddd4b97e55dfa6cd4fb9baf1",
   "tests/test_containment_alert_link.py": "ad5874ae12d6bbc462abbbaddef641ef5e9ade81199219275c2c05ddd931df77",
   "tests/test_containment_per_device.py": "48dcbf2effdc3bf6cbedcab00cc5951e8fbaabf27c1dd0ead286ffe530d4c13b",
+  "tests/test_containment_segment_wiring.py": "bb415e7ea542b13c9f3a7c778650897b98b746fc4890bb80076e6e93a4671175",
   "tests/test_device_last_seen_traffic_only.py": "35dc3e50ab6546f29280c7290b8d71b4e60cf1fdb93e172dfccd8a4a761bc460",
   "tests/test_device_merge_carryover.py": "b40dbf98c4df4b85c68272a3ee1cf6858bcfd03aaeb0aa7047fc80d94cbac3df",
   "tests/test_devices_api.py": "848c5bb0ed29f79d8c4ff96608ade51a344b566b1ad773dab8f972797a53044f",

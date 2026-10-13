@@ -84,6 +84,14 @@ def _discover_gateway_ipv4():
     from argus.identity.discovery import default_gateway_ip
     return default_gateway_ip()
 
+
+def _is_v4(ip) -> bool:
+    """True when `ip` is an IPv4 address (used to tell the ARP half's work from the NDP half's)."""
+    try:
+        return ipaddress.ip_address(str(ip).split("%", 1)[0]).version == 4
+    except (ValueError, TypeError):
+        return False
+
 # Layer-2 tarpit primitives are our own stdlib raw-socket code (mitigation/l2_raw.py), replacing scapy (GPL-2.0).
 # Linux-only, like the tarpit always was: AF_PACKET must exist. (Still needs root/CAP_NET_RAW at runtime.)
 import ipaddress
@@ -91,6 +99,9 @@ import socket as _socket_mod
 from mitigation import l2_raw
 from mitigation import containment as _ct
 from mitigation import pihole_auth
+from mitigation import peer_table as _peer_mod       # T2: same-segment peer observation (socket-free core)
+from mitigation import l2_enforcer as _l2e           # T2: which forged frames to send (socket-free decisions)
+from mitigation import nftables_fw as _nft           # T2/T3: the containment firewall (box-drop / in-path)
 L2_AVAILABLE = hasattr(_socket_mod, "AF_PACKET")
 # Key in the shared IPS state: {"armed": bool, "updated_at": epoch} as the engine's own IPSMitigator found it at start.
 ENGINE_TARPIT_STATE_KEY = "engine_tarpit"
@@ -188,6 +199,15 @@ class IPSMitigator:
         self._observed_lock = threading.Lock()
         self._containment_events = collections.deque(maxlen=100)
         self._targets_refreshed_at = 0.0
+        # T2 same-segment containment (CONTAINMENT_MODEL.md section 5). Peers observed on the wire, the IPv6 routers
+        # learned from Router Advertisements, and the box firewall (owner decision 1: a Tarpit also cuts the box
+        # itself). All socket-free cores; the sockets live in the loops below. nft absent -> every box_* call no-ops,
+        # so same-segment still works on its own.
+        self._peer_table = _peer_mod.PeerTable()
+        self._ipv6_routers: Dict[str, str] = {}      # router link-local -> real MAC, from RAs (Block-internet v6)
+        self._fw = _nft.NftContainment(uplink=None)  # uplink discovered lazily in _fw_uplink()
+        self._fw_avail: Optional[bool] = None         # cached nft availability (checked once)
+        self._fw_box_macs: set = set()                # MACs currently box-dropped (Tarpit mode), reconciled each round
         
         self._state_only = not start_workers
         if not start_workers:
@@ -314,10 +334,15 @@ class IPSMitigator:
 
     def _register_tarpit(self, dev_id: str, mac: Optional[str], hostname: str, reason: str,
                          ip: Optional[str] = None, ipv4_candidates=(),
-                         alert_ref: Optional[dict] = None) -> "tuple[bool, Optional[str]]":
+                         alert_ref: Optional[dict] = None,
+                         mode: str = _ct.TARPIT_MODE) -> "tuple[bool, Optional[str]]":
         """Creates or refreshes the device's tarpit entry ("dev:<id>"). Returns (created, key); (False, None) when the
         device has no id or no known MAC (the tarpit acts on MACs). Refreshing sets the MACs to what the device is
-        known by now -- never another device's: an address that changed hands never moves containment."""
+        known by now -- never another device's: an address that changed hands never moves containment.
+
+        `mode` (T2) is the containment scope: TARPIT_MODE cuts all traffic (peers + gateways + the box itself);
+        BLOCK_INTERNET_MODE cuts only the internet path (gateways / IPv6 routers), leaving LAN and this box reachable.
+        A refresh keeps the mode the entry was created with -- it never silently widens or narrows containment."""
         macs = self._device_macs(dev_id, mac)
         if not _ct._usable(dev_id) or not macs:
             return False, None
@@ -338,7 +363,7 @@ class IPSMitigator:
             graph_action_id = self._mirror_containment(dev_id, action_type="tarpit", status="active",
                                                        target=",".join(macs), reason=reason)
             entry = {"dev_id": dev_id, "hostname": hostname, "macs": macs, "mac": macs[0], "since": time.time(),
-                     "status": _ct.REQUESTED, "_graph_action_id": graph_action_id}
+                     "status": _ct.REQUESTED, "mode": mode, "_graph_action_id": graph_action_id}
             if _ct._usable(ip):
                 entry["registered_ip"] = ip
             if hint:
@@ -458,7 +483,12 @@ class IPSMitigator:
             self._observer_thread = threading.Thread(target=self._observer_loop, daemon=True,
                                                      name="containment_observer")
             self._observer_thread.start()
-            
+
+            # T2: observe the segment (peers + IPv6 routers), answer reactively, counter-fake re-announcements.
+            self._segment_thread = threading.Thread(target=self._segment_loop, daemon=True,
+                                                    name="containment_segment")
+            self._segment_thread.start()
+
         except Exception as exc:
             LOGGER.error("⚠️ Dual-Stack Tarpit bypassing. Lacks raw socket privileges: %s", exc)
             ips_tarpit_status.set(0.0)
@@ -480,10 +510,16 @@ class IPSMitigator:
                 ns = l2_raw.parse_neighbor_solicitation(frame)
                 if not ns:
                     continue
+                # T2: answer only when the asking device is contained AND the solicited address is in its scope --
+                # l2_enforcer.reactive_spec decides (a Tarpit answers for any address; Block internet only for a
+                # router, leaving LAN IPv6 open). Before modes this answered every NS from a contained MAC.
                 with self._lock:
-                    is_trapped = any(ns["eth_src"].lower() in _ct.entry_macs(meta)
-                                     for meta in self._tarpit_active_targets.values())
-                if not is_trapped:
+                    metas = [m for m in self._tarpit_active_targets.values()
+                             if isinstance(m, dict) and ns["eth_src"].lower() in _ct.entry_macs(m)]
+                if not metas:
+                    continue
+                peers, gws = self._peer_table.active(), self._gateways_now()
+                if not any(_l2e.reactive_spec("ns", ns["eth_src"], ns["target"], meta, peers, gws) for meta in metas):
                     continue
                 dst_ip = ns["ip_src"] if ns["ip_src"] != "::" else "ff02::1"
                 na = l2_raw.build_neighbor_advertisement(
@@ -752,13 +788,17 @@ class IPSMitigator:
             return False
         if not (L2_AVAILABLE or bool(self.config.get("simulation_mode", False))):
             return False
+        # BLOCK_INTERNET_MODE (T2): this coverage rides on router isolation, which cuts the WAN/internet path only --
+        # the matching same-segment scope fakes just the gateways / IPv6 routers, never the device's LAN peers or the
+        # box. (Before modes existed this path shared the tarpit's gateway-only ARP loop, so behaviour is unchanged
+        # until peers are observed; it never widens to a full tarpit.)
         created, _key = self._register_tarpit(dev_id, mac_addr, hostname, reason=reason, ip=client_ip,
-                                              alert_ref=alert_ref)
+                                              alert_ref=alert_ref, mode=_ct.BLOCK_INTERNET_MODE)
         if not created:
             return False
         LOGGER.critical(
-            "⚠️ [DUAL-STACK COVERAGE] Layer-2 tarpit also armed for %s (%s) alongside router "
-            "isolation -- covers this device's IPv6 path, which the router-level block alone cannot.",
+            "⚠️ [DUAL-STACK COVERAGE] Layer-2 block-internet coverage also armed for %s (%s) alongside router "
+            "isolation -- covers this device's IPv6 internet path, which the router-level block alone cannot.",
             hostname, client_ip)
         return True
 
@@ -1171,6 +1211,144 @@ class IPSMitigator:
         self._gateway_cache = (now, gw, gw_mac)
         return gw, gw_mac
 
+    def _gateways_now(self) -> Dict[str, str]:
+        """{gateway/router IP: its real MAC or ""} the scope fakes: the discovered IPv4 default gateway plus every
+        IPv6 router learned from a Router Advertisement (segment receiver). Network-agnostic -- all discovered."""
+        g: Dict[str, str] = {}
+        gw_ip, gw_mac = self._tarpit_gateway()
+        if gw_ip:
+            g[gw_ip] = _ct.norm_mac(gw_mac) or ""
+        with self._lock:
+            g.update({ip: _ct.norm_mac(mac) for ip, mac in self._ipv6_routers.items()})
+        return g
+
+    def _fw_usable(self) -> bool:
+        """nft present and writable (checked once). A state-only instance (W-01, per request) never touches the
+        firewall -- it leaves no side effects -- so it reports unusable regardless."""
+        if getattr(self, "_state_only", False):
+            return False
+        if self._fw_avail is None:
+            try:
+                if self._fw.uplink is None:
+                    self._fw.uplink = self._fw_uplink()
+                self._fw_avail = self._fw.available()
+            except Exception as exc:
+                LOGGER.debug("nft availability probe failed: %s", exc)
+                self._fw_avail = False
+        return bool(self._fw_avail)
+
+    def _fw_uplink(self) -> Optional[str]:
+        """The interface the IPv4 default gateway is reached on -- the in-path Block-internet rule drops forwarding out
+        of it. None when no gateway is known (the in-path rule is then simply not added)."""
+        gw_ip, _ = self._tarpit_gateway()
+        try:
+            return l2_raw.interface_for(gw_ip) if gw_ip else None
+        except Exception:
+            return None
+
+    def _reconcile_box_firewall(self, current: Dict[str, dict]) -> None:
+        """Owner decision 1: a Tarpit cuts the device from the box itself (Pi-hole DNS, web UI). Keep the nft
+        `box_blocked` set equal to the MACs of the TARPIT-mode entries -- adding newly contained MACs, removing
+        released/re-keyed ones. Block-internet entries are never box-dropped (the box stays reachable for them).
+        Idempotent and a no-op when nft is absent, so same-segment containment never depends on it."""
+        if not self._fw_usable():
+            return
+        want = {m for meta in current.values()
+                if isinstance(meta, dict) and meta.get("mode", _ct.TARPIT_MODE) == _ct.TARPIT_MODE
+                for m in _ct.entry_macs(meta)}
+        new, gone = want - self._fw_box_macs, self._fw_box_macs - want
+        if new:
+            self._fw.box_drop(new)
+        if gone:
+            self._fw.box_undrop(gone)
+        self._fw_box_macs = want
+
+    def _send_v4_specs(self, sock, specs, meta_by_mac, no_ipv4_logged) -> int:
+        """Send each IPv4 SendSpec as an ARP reply ('spec.ip is at spec.sender_mac') to the contained device's MAC,
+        reusing _arp_reply_for to resolve the device's own IPv4 / interface. Returns how many frames went out."""
+        sent = 0
+        for s in specs:
+            if s.family != 4:
+                continue
+            meta = meta_by_mac.get(s.dst_mac) or {}
+            try:
+                out = self._arp_reply_for(s.dst_mac, meta, s.ip, s.sender_mac, no_ipv4_logged)
+                if out:
+                    l2_raw.send_frame(sock, out[0], out[1])
+                    sent += 1
+            except Exception as exc:
+                LOGGER.debug("ARP send failed for %s -> %s: %s", s.dst_mac, s.ip, exc)
+        return sent
+
+    def _reactive_answer(self, kind: str, src_mac: str, wanted_ip: str, sock, ifname) -> None:
+        """A contained device's own ARP request (or NS) for an in-scope address is answered at once (l2_enforcer
+        decides per entry/mode). Only the entry whose MAC sent it yields a spec."""
+        with self._lock:
+            metas = [m for m in self._tarpit_active_targets.values() if isinstance(m, dict)]
+        peers, gws = self._peer_table.active(), self._gateways_now()
+        for meta in metas:
+            spec = _l2e.reactive_spec(kind, src_mac, wanted_ip, meta, peers, gws)
+            if spec and spec.family == 4:
+                try:
+                    out = self._arp_reply_for(spec.dst_mac, meta, spec.ip, spec.sender_mac, set())
+                    if out:
+                        l2_raw.send_frame(sock, out[0] or ifname, out[1])
+                except Exception as exc:
+                    LOGGER.debug("Reactive ARP answer failed: %s", exc)
+
+    def _counter_fake(self, announced_ip: str, sock, ifname) -> None:
+        """A peer/router announced itself (ARP reply / gratuitous ARP / NA / RA): re-send the fake for that address to
+        every contained device whose scope covers it, so a device that just saw the real host is re-poisoned at once."""
+        with self._lock:
+            metas = [m for m in self._tarpit_active_targets.values() if isinstance(m, dict)]
+        if not metas:
+            return
+        peers, gws = self._peer_table.active(), self._gateways_now()
+        meta_by_mac = {m: meta for meta in metas for m in _ct.entry_macs(meta)}
+        self._send_v4_specs(sock, _l2e.counter_fake_specs(announced_ip, metas, peers, gws), meta_by_mac, set())
+
+    def _segment_loop(self) -> None:
+        """T2 segment receiver (CONTAINMENT_MODEL.md section 5): one socket, kernel-filtered to ARP + ICMPv6, feeding
+        three things -- the peer table (who is on the segment), the reactive answer (a contained device's own request),
+        and the counter-fake (a peer re-announcing itself). IPv6 routers are learned here from RAs. NS -> NA is left to
+        _ndp_tarpit_loop. Frames the switch does not mirror to this box are simply not seen (no guessing)."""
+        try:
+            sock = l2_raw.open_raw()
+            l2_raw.attach_filter(sock, l2_raw.arp_and_icmp6_filter_program())
+            sock.settimeout(1.0)
+        except Exception as exc:
+            LOGGER.warning("Segment receiver not started (same-segment peer coverage limited to the gateway): %s", exc)
+            return
+        while True:
+            try:
+                try:
+                    frame, ifname = l2_raw.recv_frame(sock)
+                except (TimeoutError, OSError) as exc:
+                    if isinstance(exc, TimeoutError) or "timed out" in str(exc):
+                        continue
+                    raise
+                arp = l2_raw.parse_arp(frame)
+                if arp:
+                    if _ct._usable(arp["sender_ip"]) and arp["sender_ip"] != "0.0.0.0":
+                        self._peer_table.observe(arp["sender_ip"], arp["sender_mac"])
+                    if arp["op"] == "request":
+                        self._reactive_answer("arp_request", arp["eth_src"], arp["target_ip"], sock, ifname)
+                    self._counter_fake(arp["sender_ip"], sock, ifname)
+                    continue
+                na = l2_raw.parse_neighbor_advertisement(frame)
+                if na:
+                    self._peer_table.observe(na["target"], na["lladdr"])
+                    self._counter_fake(na["target"], sock, ifname)
+                    continue
+                ra = l2_raw.parse_router_advertisement(frame)
+                if ra:
+                    with self._lock:
+                        self._ipv6_routers[ra["ip_src"]] = _ct.norm_mac(ra["eth_src"])
+                    self._counter_fake(ra["ip_src"], sock, ifname)
+            except Exception as exc:
+                LOGGER.debug("Segment receiver iteration exception: %s", exc)
+                time.sleep(0.5)
+
     def _arp_reply_for(self, mac: str, meta: dict, gateway_ip: str, sender_mac: str, no_ipv4_logged: set):
         """(ifname, frame) telling the device's `mac` that `gateway_ip` is at `sender_mac`; None when that MAC has no
         usable IPv4 (the kernel's neighbour table for the MAC, else the hint stored for it) or no interface reaches it."""
@@ -1340,8 +1518,8 @@ class IPSMitigator:
             return
         no_ipv4_logged = set()
         no_gateway_logged = False
-        previous: Dict[str, dict] = {}       # MAC -> meta of the entries held last round
-        restoring: Dict[str, list] = {}      # MAC -> [meta, rounds left] of MACs released since
+        previous: Dict[str, dict] = {}       # device key -> meta of the entries held last round
+        restoring: Dict[str, list] = {}      # device key -> [meta, rounds left] of entries released since
         while True:
             now = time.time()
             if now - self._targets_refreshed_at >= self._TARGET_REFRESH_SECONDS:
@@ -1350,19 +1528,27 @@ class IPSMitigator:
                     self._refresh_targets_from_state()
                 except Exception as exc:
                     LOGGER.debug("Tarpit refresh failed: %s", exc)
-            gateway_ip, gateway_mac = self._tarpit_gateway()
+            gateways = self._gateways_now()                 # IPv4 gateway + IPv6 routers (the scope's gateways)
+            gateway_ip = next((ip for ip in gateways if _is_v4(ip)), None)   # the one IPv4 gateway (if any)
+            peers = self._peer_table.active()               # {ip: mac} seen on the segment within the TTL
             with self._lock:
                 targets = dict(self._tarpit_active_targets)
-            # Released = a MAC held last round and by no entry now. Every release path -- Release, release-all, the
-            # safe-device auto-release, another process's change synced in -- ends here.
-            current = {mac: meta for meta in targets.values() if isinstance(meta, dict) for mac in _ct.entry_macs(meta)}
-            for mac, meta in previous.items():
-                if mac not in current:
-                    restoring[mac] = [meta, self._RESTORE_ROUNDS]
-            for mac in current:
-                restoring.pop(mac, None)
+            # Keyed by DEVICE now (not MAC): a released device, whatever its MACs, restores its whole scope -- peers
+            # and gateway for a Tarpit, gateways only for Block internet. Every release path (Release, release-all,
+            # safe-device auto-release, another process's change synced in) lands here.
+            current = {key: meta for key, meta in targets.items() if isinstance(meta, dict)}
+            for key, meta in previous.items():
+                if key not in current:
+                    restoring[key] = [meta, self._RESTORE_ROUNDS]
+            for key in current:
+                restoring.pop(key, None)
             previous = current
-            if not gateway_ip:
+            self._reconcile_box_firewall(current)           # owner decision 1: a Tarpit also cuts the box itself
+            # The ARP half fakes the scope's IPv4 addresses. With no peers observed this is exactly the gateway, per
+            # device MAC -- unchanged from before T2. "Idle" (and the one-time warning) means no IPv4 gateway AND no
+            # IPv4 peers: nothing on this segment to fake over v4 (the NDP half still acts; peers may appear later).
+            v4_peers = {ip: mac for ip, mac in peers.items() if _is_v4(ip)}
+            if not gateway_ip and not v4_peers:
                 if not no_gateway_logged:
                     no_gateway_logged = True
                     LOGGER.warning("ARP Tarpit: no IPv4 default gateway discovered -- the ARP half is idle until one "
@@ -1370,29 +1556,19 @@ class IPSMitigator:
                 restoring.clear()
             else:
                 no_gateway_logged = False
-                for mac, meta in current.items():
-                    # One MAC per try: an exception here used to abort the round for every target after it.
-                    try:
-                        out = self._arp_reply_for(mac, meta, gateway_ip, bogus_mac, no_ipv4_logged)
-                        if out:
-                            l2_raw.send_frame(sock, out[0], out[1])
-                    except Exception as exc:
-                        LOGGER.debug("ARP Tarpit exception for %s: %s", mac, exc)
-                for mac, entry in list(restoring.items()):
+                for key, meta in current.items():
+                    specs = _l2e.refresh_specs(meta, peers, gateways, bogus=bogus_mac)
+                    self._send_v4_specs(sock, specs, {m: meta for m in _ct.entry_macs(meta)}, no_ipv4_logged)
+                for key, entry in list(restoring.items()):
                     meta, left = entry
-                    try:
-                        if gateway_mac:
-                            out = self._arp_reply_for(mac, meta, gateway_ip, gateway_mac, no_ipv4_logged)
-                            if out:
-                                l2_raw.send_frame(sock, out[0], out[1])
-                        elif left == self._RESTORE_ROUNDS:
-                            LOGGER.info("ARP Tarpit: released %s, but the gateway's real MAC is unknown -- its cache "
-                                        "recovers on its own (about a minute).", mac)
-                    except Exception as exc:
-                        LOGGER.debug("ARP Tarpit restore exception for %s: %s", mac, exc)
+                    specs = _l2e.restore_specs(meta, peers, gateways)
+                    sent = self._send_v4_specs(sock, specs, {m: meta for m in _ct.entry_macs(meta)}, no_ipv4_logged)
+                    if not sent and left == self._RESTORE_ROUNDS and gateway_ip:
+                        LOGGER.info("ARP Tarpit: released %s, but its scope's real MAC is unknown -- the device's "
+                                    "cache recovers on its own (about a minute).", meta.get("dev_id", "?"))
                     entry[1] -= 1
                     if entry[1] <= 0:
-                        restoring.pop(mac, None)
+                        restoring.pop(key, None)
             try:
                 self._update_statuses(time.time())
             except Exception as exc:
