@@ -168,43 +168,55 @@ def test_segment_loop_observes_peers_and_learns_routers(mit, monkeypatch):
 # --- box firewall reconcile (owner decision 1) ---------------------------------------------------------------------
 
 class _FakeNft:
-    def __init__(self):
+    """Records every set element add/delete. `added`/`deleted` are flat MAC lists (any set); `added_sets` keys them by
+    set name. `inpath_ok=False` makes in-path element adds fail, to drive the fail-closed path."""
+    def __init__(self, inpath_ok=True):
         self.added, self.deleted = [], []
+        self.added_sets, self.deleted_sets = {}, {}
+        self.inpath_ok = inpath_ok
 
     def __call__(self, args):
         if args[:1] == ["--version"]:
             return 0, "nftables v1.0"
-        if args[:3] == ["list", "table", "inet"]:
+        if args[:2] == ["list", "table"]:
             return 1, "No such file or directory"
         if args[:1] == ["-f"]:
-            script = args[-1]
-            for line in script.splitlines():
-                if line.startswith("add element") and "box_blocked" in line:
-                    self.added.append(line.split("{")[1].strip(" }"))
-                if line.startswith("delete element") and "box_blocked" in line:
-                    self.deleted.append(line.split("{")[1].strip(" }"))
+            for line in args[-1].splitlines():
+                verb = line.split()[:1]
+                if verb == ["add"] and line.startswith("add element"):
+                    set_name, mac = line.split()[4], line.split("{")[1].strip(" }")
+                    if set_name in ("inpath_blocked", "inpath_internet") and not self.inpath_ok:
+                        return 1, "permission denied"
+                    self.added.append(mac)
+                    self.added_sets.setdefault(set_name, []).append(mac)
+                elif line.startswith("delete element"):
+                    set_name, mac = line.split()[4], line.split("{")[1].strip(" }")
+                    self.deleted.append(mac)
+                    self.deleted_sets.setdefault(set_name, []).append(mac)
         return 0, ""
 
 
-def _fw_mit(mit):
+def _fw_mit(mit, inpath_ok=True, in_path=False):
     mit._state_only = False                       # a box with the firewall (the engine's own instance)
-    mit._fw = NftContainment(run=_FakeNft(), uplink="eth0")
+    mit._fw = NftContainment(run=_FakeNft(inpath_ok=inpath_ok), uplink="eth0")
     mit._fw_avail = None
+    # force the detection result (real OS reads would say "same segment" on the test host)
+    mit._path.method_for = lambda mac, ip, uplink: ("in_path" if in_path else "same_segment")
     return mit._fw._run
 
 
 def test_tarpit_box_drops_macs_and_undrops_on_release(mit):
     runner = _fw_mit(mit)
     tarpit = {"dev:d1": _entry("d1", [DEV_MAC], ct.TARPIT_MODE, "10.20.0.50")}
-    mit._reconcile_box_firewall(tarpit)
+    mit._reconcile_firewall(tarpit)
     assert DEV_MAC in runner.added
-    mit._reconcile_box_firewall({})               # device released
+    mit._reconcile_firewall({})               # device released
     assert DEV_MAC in runner.deleted
 
 
 def test_block_internet_is_never_box_dropped(mit):
     runner = _fw_mit(mit)
-    mit._reconcile_box_firewall({"dev:d1": _entry("d1", [DEV_MAC], ct.BLOCK_INTERNET_MODE, "10.20.0.50")})
+    mit._reconcile_firewall({"dev:d1": _entry("d1", [DEV_MAC], ct.BLOCK_INTERNET_MODE, "10.20.0.50")})
     assert runner.added == []
 
 
@@ -212,8 +224,39 @@ def test_state_only_instance_never_touches_the_firewall(mit):
     # the API-process (W-01) instance must leave no side effects
     assert mit._state_only is True
     mit._fw = NftContainment(run=_FakeNft(), uplink="eth0")
-    mit._reconcile_box_firewall({"dev:d1": _entry("d1", [DEV_MAC], ct.TARPIT_MODE, "10.20.0.50")})
+    mit._reconcile_firewall({"dev:d1": _entry("d1", [DEV_MAC], ct.TARPIT_MODE, "10.20.0.50")})
     assert mit._fw._run.added == []
+
+
+# --- T3 in-path reconcile (method detection -> bridge-family drop) -------------------------------------------------
+
+def test_in_path_tarpit_device_gets_an_inpath_drop_both_sets_name(mit):
+    runner = _fw_mit(mit, in_path=True)
+    mit._reconcile_firewall({"dev:d1": _entry("d1", [DEV_MAC], ct.TARPIT_MODE, "10.20.0.50")})
+    assert DEV_MAC in runner.added_sets.get("inpath_blocked", [])
+    mit._reconcile_firewall({})                         # released
+    assert DEV_MAC in runner.deleted_sets.get("inpath_blocked", [])
+
+
+def test_in_path_block_internet_uses_the_internet_set(mit):
+    runner = _fw_mit(mit, in_path=True)
+    mit._reconcile_firewall({"dev:d1": _entry("d1", [DEV_MAC], ct.BLOCK_INTERNET_MODE, "10.20.0.50")})
+    assert DEV_MAC in runner.added_sets.get("inpath_internet", [])
+    assert runner.added_sets.get("box_blocked") is None   # block-internet is never box-dropped
+
+
+def test_same_segment_device_gets_no_inpath_drop(mit):
+    runner = _fw_mit(mit, in_path=False)
+    mit._reconcile_firewall({"dev:d1": _entry("d1", [DEV_MAC], ct.TARPIT_MODE, "10.20.0.50")})
+    assert "inpath_blocked" not in runner.added_sets    # only box-drop applies on a same-segment box
+    assert DEV_MAC in runner.added_sets.get("box_blocked", [])
+
+
+def test_fail_closed_surfaces_a_containment_event_when_the_inpath_drop_fails(mit):
+    _fw_mit(mit, inpath_ok=False, in_path=True)
+    mit._reconcile_firewall({"dev:d1": _entry("d1", [DEV_MAC], ct.TARPIT_MODE, "10.20.0.50")})
+    events = mit.pop_containment_events()
+    assert any(e["type"] == "inpath_enforcement_failed" and e["mac"] == DEV_MAC for e in events)
 
 
 # --- mode is set correctly at the two entry points -----------------------------------------------------------------

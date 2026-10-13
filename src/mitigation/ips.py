@@ -102,6 +102,7 @@ from mitigation import pihole_auth
 from mitigation import peer_table as _peer_mod       # T2: same-segment peer observation (socket-free core)
 from mitigation import l2_enforcer as _l2e           # T2: which forged frames to send (socket-free decisions)
 from mitigation import nftables_fw as _nft           # T2/T3: the containment firewall (box-drop / in-path)
+from mitigation import path_detect as _path          # T3: per-device in-path vs same-segment method detection
 L2_AVAILABLE = hasattr(_socket_mod, "AF_PACKET")
 # Key in the shared IPS state: {"armed": bool, "updated_at": epoch} as the engine's own IPSMitigator found it at start.
 ENGINE_TARPIT_STATE_KEY = "engine_tarpit"
@@ -208,6 +209,11 @@ class IPSMitigator:
         self._fw = _nft.NftContainment(uplink=None)  # uplink discovered lazily in _fw_uplink()
         self._fw_avail: Optional[bool] = None         # cached nft availability (checked once)
         self._fw_box_macs: set = set()                # MACs currently box-dropped (Tarpit mode), reconciled each round
+        # T3 in-path: per-device method detection + the in-path firewall drop (bridge family). On a same-segment box
+        # (.94 today) detection returns "same segment" for every device, so no bridge table is ever created.
+        self._path = _path.PathDetector()
+        self._fw_inpath_macs: Dict[str, str] = {}     # MAC -> mode currently in-path-dropped, reconciled each round
+        self._path_cache: Dict[str, "tuple[float, str]"] = {}   # MAC -> (checked_at, method); detection is cached
         
         self._state_only = not start_workers
         if not start_workers:
@@ -1246,22 +1252,70 @@ class IPSMitigator:
         except Exception:
             return None
 
-    def _reconcile_box_firewall(self, current: Dict[str, dict]) -> None:
-        """Owner decision 1: a Tarpit cuts the device from the box itself (Pi-hole DNS, web UI). Keep the nft
-        `box_blocked` set equal to the MACs of the TARPIT-mode entries -- adding newly contained MACs, removing
-        released/re-keyed ones. Block-internet entries are never box-dropped (the box stays reachable for them).
-        Idempotent and a no-op when nft is absent, so same-segment containment never depends on it."""
+    # T3: how long a device's detected containment method (in path / same segment) is trusted before re-checking.
+    _PATH_METHOD_TTL_SECONDS = 30.0
+
+    def _method_for(self, mac: str, ip: Optional[str], uplink: Optional[str], now: float) -> str:
+        """Cached per-device path detection (IN_PATH / SAME_SEGMENT). Cached because the OS reads (bridge fdb, ip
+        neigh) are spawned per round; a device's topology does not change every 2 s."""
+        hit = self._path_cache.get(mac)
+        if hit and now - hit[0] < self._PATH_METHOD_TTL_SECONDS:
+            return hit[1]
+        method = self._path.method_for(mac, ip, uplink)
+        self._path_cache[mac] = (now, method)
+        return method
+
+    def _reconcile_firewall(self, current: Dict[str, dict]) -> None:
+        """Keep the nftables containment sets equal to what the live entries require, each round:
+          - **box-drop** (owner decision 1): a Tarpit cuts the device from the box itself (Pi-hole DNS, web UI) --
+            `box_blocked` = the MACs of TARPIT-mode entries. Block-internet entries are never box-dropped.
+          - **in-path** (T3): for each device this box is in the forwarding path for (bridge / AP / router, detected
+            per device), drop its frames in the bridge `forward` hook -- both directions for a Tarpit, egress-to-uplink
+            for Block internet. On a same-segment box (.94 today) detection returns "same segment" for all, so the
+            bridge table is never created and this is a no-op beyond the detection read.
+        Idempotent; a full no-op when nft is absent or on a state-only instance, so same-segment containment never
+        depends on it. Owner decision 2 (fail closed in path): a device detected in-path whose drop cannot be installed
+        is surfaced (CRITICAL + a containment event), never silently treated as contained."""
         if not self._fw_usable():
             return
-        want = {m for meta in current.values()
-                if isinstance(meta, dict) and meta.get("mode", _ct.TARPIT_MODE) == _ct.TARPIT_MODE
-                for m in _ct.entry_macs(meta)}
-        new, gone = want - self._fw_box_macs, self._fw_box_macs - want
+        now = time.time()
+        uplink = self._fw.uplink or self._fw_uplink()
+        # -- box-drop (Tarpit only) --
+        want_box = {m for meta in current.values()
+                    if isinstance(meta, dict) and meta.get("mode", _ct.TARPIT_MODE) == _ct.TARPIT_MODE
+                    for m in _ct.entry_macs(meta)}
+        new, gone = want_box - self._fw_box_macs, self._fw_box_macs - want_box
         if new:
             self._fw.box_drop(new)
         if gone:
             self._fw.box_undrop(gone)
-        self._fw_box_macs = want
+        self._fw_box_macs = want_box
+        # -- in-path (both modes), per detected device --
+        want_inpath: Dict[str, str] = {}      # MAC -> mode, for the devices this box forwards
+        for meta in current.values():
+            if not isinstance(meta, dict):
+                continue
+            mode = meta.get("mode", _ct.TARPIT_MODE)
+            arp_ips = meta.get("arp_ips") or {}
+            for m in _ct.entry_macs(meta):
+                ip = arp_ips.get(m) or meta.get("registered_ip")
+                if self._method_for(m, ip, uplink, now) == _path.IN_PATH:
+                    want_inpath[m] = mode
+        for m, mode in want_inpath.items():
+            if self._fw_inpath_macs.get(m) == mode:
+                continue
+            if m in self._fw_inpath_macs:                      # mode changed -> drop the old set's element first
+                self._fw.inpath_undrop([m], self._fw_inpath_macs[m])
+            if not self._fw.inpath_drop([m], mode):            # fail closed: surface, never pretend it holds
+                LOGGER.critical("⚠️ [IN-PATH FAIL-CLOSED] could not install the in-path drop for %s (%s) -- this box "
+                                "forwards its traffic but the kernel rule did not apply; containment is NOT enforced "
+                                "in path.", m, mode)
+                self._containment_events.append({"type": "inpath_enforcement_failed", "mac": m, "mode": mode,
+                                                 "at": now})
+        for m, mode in list(self._fw_inpath_macs.items()):
+            if m not in want_inpath:
+                self._fw.inpath_undrop([m], mode)
+        self._fw_inpath_macs = want_inpath
 
     def _send_v4_specs(self, sock, specs, meta_by_mac, no_ipv4_logged) -> int:
         """Send each IPv4 SendSpec as an ARP reply ('spec.ip is at spec.sender_mac') to the contained device's MAC,
@@ -1543,7 +1597,7 @@ class IPSMitigator:
             for key in current:
                 restoring.pop(key, None)
             previous = current
-            self._reconcile_box_firewall(current)           # owner decision 1: a Tarpit also cuts the box itself
+            self._reconcile_firewall(current)               # box-drop (decision 1) + in-path drop (T3) by detection
             # The ARP half fakes the scope's IPv4 addresses. With no peers observed this is exactly the gateway, per
             # device MAC -- unchanged from before T2. "Idle" (and the one-time warning) means no IPv4 gateway AND no
             # IPv4 peers: nothing on this segment to fake over v4 (the NDP half still acts; peers may appear later).
