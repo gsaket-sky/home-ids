@@ -271,6 +271,27 @@ def test_clear_stale_isolation_matches_device_mac_or_registered_ip_not_a_name(tm
     assert run(M2.upper()) == {"dev:d1"}                                        # by MAC
     assert run("10.0.0.5") == set()                                             # by the registered address
 
+# ------------------------------------------------------------------------------------------------ fake_scope (T2)
+
+def test_fake_scope_tarpit_is_peers_plus_gateways_minus_self():
+    peers = {"10.0.0.5": "aa:bb:cc:00:00:05", "10.0.0.6": "aa:bb:cc:00:00:06", "10.0.0.9": "de:ad:be:ef:00:09"}
+    gw = {"10.0.0.1": "gw00", "fe80::1": ""}
+    scope = ct.fake_scope(ct.TARPIT_MODE, peers, gw, device_macs=["DE:AD:BE:EF:00:09"])
+    assert set(scope) == {"10.0.0.5", "10.0.0.6", "10.0.0.1", "fe80::1"}   # own MAC's address excluded
+    assert scope["10.0.0.1"] == "gw00"
+
+
+def test_fake_scope_block_internet_is_gateways_only():
+    peers = {"10.0.0.5": "aa:bb:cc:00:00:05"}
+    gw = {"10.0.0.1": "gw00", "fe80::1": "r6"}
+    assert ct.fake_scope(ct.BLOCK_INTERNET_MODE, peers, gw) == {"10.0.0.1": "gw00", "fe80::1": "r6"}
+
+
+def test_fake_scope_a_gateway_also_a_peer_keeps_the_gateway_real_mac():
+    peers = {"10.0.0.1": "aa:bb:cc:00:00:01"}
+    gw = {"10.0.0.1": "realgw"}
+    assert ct.fake_scope(ct.TARPIT_MODE, peers, gw) == {"10.0.0.1": "realgw"}
+
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))

@@ -64,6 +64,23 @@ def build_arp_reply(*, eth_src: str, eth_dst: str, sender_mac: str, sender_ip: s
     return eth + arp
 
 
+def parse_arp(frame: bytes) -> Optional[Dict[str, str]]:
+    """{op ('request'/'reply'), eth_src, eth_dst, sender_mac, sender_ip, target_mac, target_ip} for an untagged
+    Ethernet IPv4 ARP frame, else None. Feeds the peer table (an ARP reply or gratuitous ARP announces sender_ip is at
+    sender_mac) and the reactive answer (a contained device's request names target_ip it wants to reach)."""
+    if len(frame) < 42 or struct.unpack_from("!H", frame, 12)[0] != ETH_P_ARP:
+        return None
+    htype, ptype, hlen, plen, op = struct.unpack_from("!HHBBH", frame, 14)
+    if ptype != 0x0800 or hlen != 6 or plen != 4 or op not in (1, 2):
+        return None
+    return {
+        "op": "request" if op == 1 else "reply",
+        "eth_src": mac_str(frame[6:12]), "eth_dst": mac_str(frame[0:6]),
+        "sender_mac": mac_str(frame[22:28]), "sender_ip": str(ipaddress.IPv4Address(frame[28:32])),
+        "target_mac": mac_str(frame[32:38]), "target_ip": str(ipaddress.IPv4Address(frame[38:42])),
+    }
+
+
 # ---- IPv6 / NDP -------------------------------------------------------------------------------
 def _checksum(data: bytes) -> int:
     if len(data) % 2:
@@ -107,6 +124,60 @@ def build_neighbor_advertisement(*, eth_src: str, eth_dst: str, ip_src: str, ip_
     ip6 = struct.pack("!IHBB", 0x60000000, len(icmp), IPPROTO_ICMPV6, 255) + src + dst
     eth = mac_bytes(eth_dst) + mac_bytes(eth_src) + struct.pack("!H", ETH_P_IPV6)
     return eth + ip6 + icmp
+
+
+ICMPV6_RA = 134
+
+
+def _icmp6_type(frame: bytes) -> Optional[int]:
+    if len(frame) < _OFF_ICMP + 1 or struct.unpack_from("!H", frame, 12)[0] != ETH_P_IPV6:
+        return None
+    if frame[_OFF_IPV6] >> 4 != 6 or frame[_OFF_IPV6_NH] != IPPROTO_ICMPV6:
+        return None
+    return frame[_OFF_ICMP]
+
+
+def _ndp_target_lladdr(frame: bytes) -> Optional[str]:
+    """The Target/Source Link-Layer Address option (type 1 or 2, len 1) right after the NS/NA target, if present."""
+    off = _OFF_NS_TARGET + 16
+    if len(frame) >= off + 8 and frame[off] in (1, 2) and frame[off + 1] == 1:
+        return mac_str(frame[off + 2:off + 8])
+    return None
+
+
+def parse_neighbor_advertisement(frame: bytes) -> Optional[Dict[str, str]]:
+    """{eth_src, target (the advertised IPv6), lladdr (MAC that owns it)} for an NA frame, else None. An NA announces
+    target is at lladdr -- feeds the peer table and the counter-fake."""
+    if _icmp6_type(frame) != ICMPV6_NA or len(frame) < _OFF_NS_TARGET + 16:
+        return None
+    return {
+        "eth_src": mac_str(frame[6:12]),
+        "target": str(ipaddress.IPv6Address(frame[_OFF_NS_TARGET:_OFF_NS_TARGET + 16])),
+        "lladdr": _ndp_target_lladdr(frame) or mac_str(frame[6:12]),
+    }
+
+
+def parse_router_advertisement(frame: bytes) -> Optional[Dict[str, str]]:
+    """{eth_src, ip_src (the router's link-local)} for a Router Advertisement, else None. Learns the IPv6 routers to
+    fake for Block internet (section 5); a router change is just a new RA."""
+    if _icmp6_type(frame) != ICMPV6_RA:
+        return None
+    return {"eth_src": mac_str(frame[6:12]),
+            "ip_src": str(ipaddress.IPv6Address(frame[_OFF_IPV6_SRC:_OFF_IPV6_SRC + 16]))}
+
+
+def arp_and_icmp6_filter_program() -> list:
+    """Classic BPF: accept ARP (0x0806) and IPv6/ICMPv6 (NS/NA/RA parsed in Python), drop everything else. Used by the
+    enforcer's segment receiver so the kernel drops unrelated traffic before Python sees it."""
+    return [
+        (0x28, 0, 0, 12),               # 0: ldh [12] ethertype
+        (0x15, 4, 0, ETH_P_ARP),        # 1: arp -> accept (skip to idx6)
+        (0x15, 0, 2, ETH_P_IPV6),       # 2: ipv6? else drop (skip to idx5)
+        (0x30, 0, 0, _OFF_IPV6_NH),     # 3: ldb [20] next header
+        (0x15, 1, 0, IPPROTO_ICMPV6),   # 4: icmp6 -> accept (idx6) else drop (idx5)
+        (0x06, 0, 0, 0),                # 5: drop
+        (0x06, 0, 0, 0x40000),          # 6: accept
+    ]
 
 
 # Classic BPF: accept only IPv6 / ICMPv6 / type 135 (NS), so the kernel drops every other frame

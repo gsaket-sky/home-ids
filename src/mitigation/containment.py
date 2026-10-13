@@ -16,6 +16,27 @@ from typing import Any, Dict, Iterable, List, Optional
 
 TARPIT_KEY_PREFIX = "dev:"
 
+# What a contained device loses (CONTAINMENT_MODEL.md section 2, T2). TARPIT cuts all its traffic (every peer + the
+# gateways, plus a firewall drop to the box); BLOCK_INTERNET cuts only the internet (the gateways / IPv6 RA routers),
+# leaving home traffic open. The same-segment enforcer fakes, to the device, the link-layer address of each host in its
+# scope.
+TARPIT_MODE = "tarpit"
+BLOCK_INTERNET_MODE = "block_internet"
+
+
+def fake_scope(mode: str, peers: Dict[str, str], gateways: Dict[str, str], device_macs=()) -> Dict[str, str]:
+    """{ip: real_mac} the enforcer must fake to a device in `mode`. `peers` is the live peer table (ip->mac), `gateways`
+    the discovered IPv4 gateway + IPv6 RA routers (ip->real_mac, real_mac "" when unknown). For TARPIT: every peer plus
+    the gateways (all its traffic). For BLOCK_INTERNET: the gateways only (internet only, home stays open). The device's
+    own addresses are never faked to itself (exclude its MACs)."""
+    own = {norm_mac(m) for m in device_macs if _usable(m)}
+    scope = dict(gateways or {})
+    if mode == TARPIT_MODE:
+        for ip, mac in (peers or {}).items():
+            if norm_mac(mac) not in own and ip not in scope:
+                scope[ip] = mac
+    return scope
+
 # Per-device enforcement state (T1), from what the box actually observes of the device's frames (IPSMitigator's
 # observer) -- never inferred:
 #   requested    registered; the first seconds after the engine starts acting
