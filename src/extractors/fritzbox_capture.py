@@ -839,6 +839,11 @@ class ReactiveCaptureDispatcher:
         # reason (see that function's own docstring).
         self._last_disk_check = 0.0
 
+    @property
+    def disk_degraded(self) -> bool:
+        """True while the disk budget is exhausted and bursts are deferred (read by the source-availability registry)."""
+        return bool(self._disk_degraded)
+
     def _check_disk_budget(self, config: dict) -> bool:
         """Pure disk-space bookkeeping, no threading -- same testability convention as
         _check_and_consume_budget() below. Reject-when-full, prune-oldest-first:

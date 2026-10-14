@@ -1401,6 +1401,25 @@ def _note_engine_error(engine: str, exc: Exception) -> None:
     entry["last_error"] = f"{type(exc).__name__}: {exc}"[:300]
 
 
+def note_feature_collisions(collisions) -> None:
+    """The pipeline's feature assembly (core/feature_assembly.py) found two sources producing one key: a code defect, not
+    an input problem. The first source's value was kept; reported as a "features" engine error (health probe
+    `engine_errors`), logged once per key pair."""
+    for c in collisions:
+        key = (c.key, c.owner, c.intruder)
+        if key in _reported_feature_collisions:
+            continue
+        _reported_feature_collisions.add(key)
+        LOGGER.error("Feature %r is produced by both %r and %r; keeping %r's value. This is a code defect -- investigate.",
+                     c.key, c.owner, c.intruder, c.owner)
+    if collisions:
+        _note_engine_error("features", ValueError(
+            "feature produced by two sources: " + ", ".join(f"{c.key} ({c.owner}/{c.intruder})" for c in collisions[:3])))
+
+
+_reported_feature_collisions: set = set()
+
+
 def engine_error_status() -> Dict[str, Dict[str, Any]]:
     """{"decision"|"cl_afpe": {"count", "last_error_at", "last_error"}} since this process started."""
     return {k: dict(v) for k, v in _engine_errors.items()}

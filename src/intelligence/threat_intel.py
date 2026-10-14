@@ -596,6 +596,11 @@ class ThreatIntel:
         with self._lock:
             self._bad_ips, self._bad_domains, self._bad_urls, self._bad_cidrs = ips, domains, urls, cidrs
 
+    def tranco_status(self) -> dict:
+        """Whether the Tranco list is switched on and how many ranks are loaded (source-availability registry)."""
+        with self._lock:
+            return {"enabled": bool(self.tranco_enabled), "ranks_loaded": len(self._tranco_ranks)}
+
     def _refresh_tranco_trust_list(self) -> None:
         cache_file = self.cache_dir / "tranco_top10k.cache"
         # BUGFIX: the CL-AFPE's Stage-2 LightGBM feature vector and

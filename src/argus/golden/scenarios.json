@@ -96,6 +96,53 @@
    "expect": {"outcome": "watch"}
   },
   {
+   "id": "benign_large_transfer_dns_gap_tunnel",
+   "title": "A large encrypted upload to a direct address with no DNS lookup of it (a VPN / tunnel / wifi-calling-shaped flow, no attack fact)",
+   "kind": "benign", "twin": "exfil_to_listed_host",
+   "frameworks": {"attack": ["T1572"], "d3fend": ["D3-PHDURA", "D3-DNSTA"], "nist": ["800-94:tuning", "800-94:evasion"]},
+   "entities": {"DST": "203.0.113.45"},
+   "timeline": [{"at": 0, "evidence": [
+     {"type": "zeek_exfiltration", "dest": "$DST", "value": 500000000, "confidence": 0.9,
+      "provenance": "detector:threat_signals:zeek_exfiltration:massive:x"},
+     {"type": "dns_evasion_anomaly", "dest": "$DST", "value": 1.0, "confidence": 0.9,
+      "provenance": "detector:dns_evasion:no_dns_history:direct ip"}]}],
+   "expect": {"outcome": "none"},
+   "known_gaps": [{"phase": "P3",
+     "why": "owner review 2026-10-14 of a real alert: a large transfer plus a DNS gap are counted as two independent attack families, reach HIGH DATA_EXFILTRATION and authorise containment (basis corroborated). Principles 1, 2 and 6: a volume anomaly is ANOMALOUS, an attribution gap contributes nothing, HIGH needs an attack-specific fact and the benign explanations (tunnel, wifi calling, backup, sync) evaluated. Containment side: pull the attack-specific requirement into the containment gate first (MASTER_TODO 0d, worked example 3)",
+     "today": {"state_at_most": "HIGH", "containment": ["corroborated", null]}}]
+  },
+  {
+   "id": "benign_certificate_traffic_ja3_and_protocol_notice",
+   "title": "Routine certificate-validation traffic with a protocol notice on one destination and a fingerprint-list hit tied to another destination's name",
+   "kind": "benign", "twin": "c2_beacon_to_listed_host",
+   "frameworks": {"d3fend": ["D3-NTA"], "nist": ["800-94:tuning", "800-61:analysis-related-evidence"]},
+   "entities": {"A": "203.0.113.50", "B": "telemetry.example.net"},
+   "timeline": [{"at": 0, "evidence": [
+     {"type": "zeek_notice_medium", "dest": "$A", "confidence": 0.6, "provenance": "weird:QUIC_protocol_oddity"},
+     {"type": "malicious_ja3", "dest": "$B", "confidence": 0.9, "provenance": "ja3:0123456789abcdef"}]}],
+   "expect": {"outcome": "none"},
+   "known_gaps": [{"phase": "P3",
+     "why": "owner review 2026-10-14 of a real alert: the decision engine alone says SUSPICIOUS here (B6: both families are Zeek-derived and count once), yet the alert reached HIGH -- path not yet traced (persistence escalation is the likely one) -- and said 'matched a known-bad signature directly'. A fingerprint-list hit is a client-fingerprint match, not a payload signature, and needs its hash, list source, exact-vs-similar and the SAME flow (uid / SNI) as the other evidence; a protocol notice is context; a destination-less relatedness test (the hypothesis's own evidence types define its anchor set) lets two destinations corroborate each other",
+     "today": {"state_at_most": "SUSPICIOUS", "containment": [null]}}]
+  },
+  {
+   "id": "benign_shared_local_resolver_dns_gap_weak_notice",
+   "title": "Several devices use the same LAN resolver; one has a DNS attribution gap on an unrelated address and a weak protocol notice on a third",
+   "kind": "benign", "twin": "fleet_dga_campaign",
+   "frameworks": {"d3fend": ["D3-NTCD", "D3-DNSTA"], "nist": ["800-94:tuning", "800-94:benign-mass-event"]},
+   "entities": {"RESOLVER": "192.0.2.41", "GAP": "198.51.100.134", "NOTICE": "203.0.113.1"},
+   "device": {"type": "smart_tv"},
+   "timeline": [{"at": 0, "evidence": [
+     {"type": "dns_evasion_anomaly", "dest": "$GAP", "confidence": 0.9, "provenance": "detector:dns_evasion:no_dns_history:x"},
+     {"type": "zeek_notice_weak", "dest": "$NOTICE", "confidence": 0.4, "provenance": "weird:window_recision"}]}],
+   "context": {"derived": [{"type": "coordinated_targeting", "dest": "$RESOLVER", "value": 3.0, "confidence": 1.0,
+     "provenance": "v13_live_engine:coordinated_targeting", "features": {"other_devices": ["peer-1", "peer-2"]}}]},
+   "expect": {"outcome": "none"},
+   "known_gaps": [{"phase": "P2",
+     "why": "owner review 2026-10-14 of a real alert (HIGH COORDINATED_TARGETING, three destinations, a LAN resolver on port 53): evidence about three different destinations was presented as three independent families. In the decision engine today this mix is SUSPICIOUS (the shared item is stripped by the anchor filter); how the real alert reached HIGH is not yet traced (the LAN-destination exclusion has been live since 2026-09-29, so the alert may predate it or came through another path)",
+     "today": {"state_at_most": "SUSPICIOUS", "containment": [null]}}]
+  },
+  {
    "id": "exfil_to_young_listed_domain",
    "title": "Upload to a domain registered just before first use, which intel lists",
    "kind": "attack", "twin": "benign_nightly_backup",
@@ -603,6 +650,11 @@
    "twin": "decoy_contact", "status": "pending",
    "pending": {"phase": "P3", "needs": "session verdict as the only action gate (design P box)"},
    "frameworks": {"nist": ["800-61:containment"]},
+   "expect": {"outcome": "none"}},
+  {"id": "benign_wifi_calling_epdg", "title": "A device repeatedly looks up a carrier ePDG name (wifi calling) while a separate large tunnel-shaped flow runs", "kind": "benign",
+   "twin": "exfil_to_listed_host", "status": "pending",
+   "pending": {"phase": "P2", "needs": "the resolution chain query -> answer -> address -> flow (a blocked or unanswered lookup cannot be the origin of a flow), carrier ePDG names recognised as a benign class, IKEv2 UDP 500/4500 facts (ePDG uses those, not 51820); design B, N1, P"},
+   "frameworks": {"d3fend": ["D3-DNSTA"], "nist": ["800-94:tuning"]},
    "expect": {"outcome": "none"}},
   {"id": "box_own_traffic", "title": "The box's own outbound traffic, against a strict role profile", "kind": "benign",
    "twin": "exfil_to_listed_host", "status": "pending",

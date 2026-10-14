@@ -382,7 +382,9 @@ def test_every_feature_key_a_detector_reads_is_produced():
                         for p in SRC_DIR.rglob("*.py") if p not in consumers)
     missing = sorted(k for k in read
                      if not re.search(r'["\']%s["\']\s*:' % re.escape(k), producers)
-                     and not re.search(r'features\[\s*["\']%s["\']\s*\]\s*=' % re.escape(k), producers))
+                     and not re.search(r'features\[\s*["\']%s["\']\s*\]\s*=' % re.escape(k), producers)
+                     # the pipeline's feature assembly (core/feature_assembly.py): asm.derive("<stage>", "<key>", value)
+                     and not re.search(r'\.derive\(\s*["\'][a-z_]+["\']\s*,\s*["\']%s["\']' % re.escape(k), producers))
     assert missing == [], f"read by a detector but produced nowhere: {missing}"
 
 

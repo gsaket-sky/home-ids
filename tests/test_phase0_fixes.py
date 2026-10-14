@@ -237,7 +237,8 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir2:
 # silently reverted or the key never reaching the features dict fp_engine.py reads.
 _pipeline_src = (_PathForSysPath(__file__).resolve().parent.parent / "src" / "core" / "pipeline.py").read_text(encoding="utf-8")
 check("pipeline.py populates features['tranco_rank'] via ti_engine.get_tranco_rank()",
-      'features["tranco_rank"] = self.ti_engine.get_tranco_rank(top_domain)' in _pipeline_src)
+      # written through the pipeline's feature assembly (core/feature_assembly.py: asm.derive(stage, key, value))
+      'asm.derive("reputation", "tranco_rank", self.ti_engine.get_tranco_rank(top_domain)' in _pipeline_src)
 
 print()
 if FAILURES:

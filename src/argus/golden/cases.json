@@ -58,9 +58,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "ok",
      "geoip": "ok",
-     "threat_feeds": "ok",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "ok",
+     "tranco": "disabled",
+     "virustotal": "ok",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -185,9 +191,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "ok",
      "geoip": "ok",
-     "threat_feeds": "ok",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "ok",
+     "tranco": "disabled",
+     "virustotal": "ok",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -276,9 +288,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "ok",
      "geoip": "ok",
-     "threat_feeds": "ok",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "ok",
+     "tranco": "disabled",
+     "virustotal": "ok",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -371,9 +389,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "ok",
      "geoip": "ok",
-     "threat_feeds": "ok",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "ok",
+     "tranco": "disabled",
+     "virustotal": "ok",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -462,9 +486,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "ok",
      "geoip": "ok",
-     "threat_feeds": "ok",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "ok",
+     "tranco": "disabled",
+     "virustotal": "ok",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -540,9 +570,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "ok",
      "geoip": "ok",
-     "threat_feeds": "ok",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "ok",
+     "tranco": "disabled",
+     "virustotal": "ok",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -631,9 +667,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "ok",
      "geoip": "ok",
-     "threat_feeds": "ok",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "ok",
+     "tranco": "disabled",
+     "virustotal": "ok",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -738,9 +780,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "ok",
      "geoip": "ok",
-     "threat_feeds": "ok",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "ok",
+     "tranco": "disabled",
+     "virustotal": "ok",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -847,9 +895,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "ok",
      "geoip": "ok",
-     "threat_feeds": "ok",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "ok",
+     "tranco": "disabled",
+     "virustotal": "ok",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -958,9 +1012,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "ok",
      "geoip": "ok",
-     "threat_feeds": "ok",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "ok",
+     "tranco": "disabled",
+     "virustotal": "ok",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -1068,9 +1128,15 @@
      "vt_detection_ratio": 1.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "ok",
      "geoip": "ok",
-     "threat_feeds": "ok",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "ok",
+     "tranco": "disabled",
+     "virustotal": "ok",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -1175,9 +1241,15 @@
      "vt_detection_ratio": 1.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "ok",
      "geoip": "ok",
-     "threat_feeds": "ok",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "ok",
+     "tranco": "disabled",
+     "virustotal": "ok",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -1274,9 +1346,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "ok",
      "geoip": "ok",
-     "threat_feeds": "ok",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "ok",
+     "tranco": "disabled",
+     "virustotal": "ok",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -1371,9 +1449,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "ok",
      "geoip": "ok",
-     "threat_feeds": "ok",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "ok",
+     "tranco": "disabled",
+     "virustotal": "ok",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -1468,9 +1552,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "ok",
      "geoip": "ok",
-     "threat_feeds": "ok",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "ok",
+     "tranco": "disabled",
+     "virustotal": "ok",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -1587,9 +1677,15 @@
      "vt_detection_ratio": 1.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "ok",
      "geoip": "ok",
-     "threat_feeds": "ok",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "ok",
+     "tranco": "disabled",
+     "virustotal": "ok",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -1686,9 +1782,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "ok",
      "geoip": "ok",
-     "threat_feeds": "ok",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "ok",
+     "tranco": "disabled",
+     "virustotal": "ok",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -1777,9 +1879,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "ok",
      "geoip": "ok",
-     "threat_feeds": "ok",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "ok",
+     "tranco": "disabled",
+     "virustotal": "ok",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -1868,9 +1976,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "ok",
      "geoip": "ok",
-     "threat_feeds": "ok",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "ok",
+     "tranco": "disabled",
+     "virustotal": "ok",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -1959,9 +2073,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "ok",
      "geoip": "ok",
-     "threat_feeds": "ok",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "ok",
+     "tranco": "disabled",
+     "virustotal": "ok",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -2050,9 +2170,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "ok",
      "geoip": "ok",
-     "threat_feeds": "ok",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "ok",
+     "tranco": "disabled",
+     "virustotal": "ok",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -2159,9 +2285,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "ok",
      "geoip": "ok",
-     "threat_feeds": "ok",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "ok",
+     "tranco": "disabled",
+     "virustotal": "ok",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -2267,9 +2399,15 @@
      "vt_detection_ratio": 1.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "ok",
      "geoip": "ok",
-     "threat_feeds": "ok",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "ok",
+     "tranco": "disabled",
+     "virustotal": "ok",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -2378,9 +2516,15 @@
      "vt_detection_ratio": 1.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "ok",
      "geoip": "ok",
-     "threat_feeds": "ok",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "ok",
+     "tranco": "disabled",
+     "virustotal": "ok",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -2498,9 +2642,15 @@
      "vt_detection_ratio": 1.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "ok",
      "geoip": "ok",
-     "threat_feeds": "ok",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "ok",
+     "tranco": "disabled",
+     "virustotal": "ok",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -2597,9 +2747,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "ok",
      "geoip": "ok",
-     "threat_feeds": "ok",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "ok",
+     "tranco": "disabled",
+     "virustotal": "ok",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -2698,9 +2854,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "ok",
      "geoip": "ok",
-     "threat_feeds": "ok",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "ok",
+     "tranco": "disabled",
+     "virustotal": "ok",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -2795,9 +2957,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "ok",
      "geoip": "ok",
-     "threat_feeds": "ok",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "ok",
+     "tranco": "disabled",
+     "virustotal": "ok",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -2902,9 +3070,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "ok",
      "geoip": "ok",
-     "threat_feeds": "ok",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "ok",
+     "tranco": "disabled",
+     "virustotal": "ok",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -2991,9 +3165,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "ok",
      "geoip": "ok",
-     "threat_feeds": "ok",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "ok",
+     "tranco": "disabled",
+     "virustotal": "ok",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -3085,9 +3265,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "ok",
      "geoip": "ok",
-     "threat_feeds": "ok",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "ok",
+     "tranco": "disabled",
+     "virustotal": "ok",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -3186,9 +3372,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "ok",
      "geoip": "ok",
-     "threat_feeds": "ok",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "ok",
+     "tranco": "disabled",
+     "virustotal": "ok",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -3295,9 +3487,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "ok",
      "geoip": "ok",
-     "threat_feeds": "ok",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "ok",
+     "tranco": "disabled",
+     "virustotal": "ok",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -3381,9 +3579,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "ok",
      "geoip": "ok",
-     "threat_feeds": "ok",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "ok",
+     "tranco": "disabled",
+     "virustotal": "ok",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -3472,9 +3676,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "ok",
      "geoip": "ok",
-     "threat_feeds": "ok",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "ok",
+     "tranco": "disabled",
+     "virustotal": "ok",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -3554,9 +3764,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "ok",
      "geoip": "ok",
-     "threat_feeds": "ok",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "ok",
+     "tranco": "disabled",
+     "virustotal": "ok",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -3645,9 +3861,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "unavailable",
      "geoip": "ok",
-     "threat_feeds": "unavailable",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "unavailable",
+     "tranco": "disabled",
+     "virustotal": "unavailable",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -3736,9 +3958,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "disabled",
      "geoip": "ok",
-     "threat_feeds": "disabled",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "disabled",
+     "tranco": "disabled",
+     "virustotal": "disabled",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -3778,6 +4006,242 @@
    },
    "pinned_reason": "scenario catalogue (2026-10-14): each pin is what the code at a3108be decides for the compiled spec, inside the spec's bounds",
    "title": "ARP cache poisoning: the device answers for another address"
+  },
+  {
+   "case_id": "scn:benign_certificate_traffic_ja3_and_protocol_notice@burst/failing",
+   "expect": {
+    "containment": [
+     null
+    ],
+    "state_at_least": null,
+    "state_at_most": "SUSPICIOUS"
+   },
+   "gathered": {
+    "baseline_familiarity": 0.0,
+    "baseline_v2": [],
+    "device_id": "golden-device",
+    "device_type": "laptop",
+    "domain_age_v2": [],
+    "features": {
+     "zeek_honeypot_hits": 0
+    },
+    "fresh_v2": [
+     {
+      "confidence": 0.6,
+      "destination_id": "203.0.113.50",
+      "device_id": "golden-device",
+      "evidence_type": "zeek_notice_medium",
+      "features": {},
+      "independence_family": "network_behavior",
+      "provenance": "weird:QUIC_protocol_oddity",
+      "source": "golden-scenario",
+      "timestamp": 1800000000.0,
+      "value": 1.0
+     },
+     {
+      "confidence": 0.9,
+      "destination_id": "telemetry.example.net",
+      "device_id": "golden-device",
+      "evidence_type": "malicious_ja3",
+      "features": {},
+      "independence_family": "tls_fingerprint",
+      "provenance": "ja3:0123456789abcdef",
+      "source": "golden-scenario",
+      "timestamp": 1800000000.0,
+      "value": 1.0
+     }
+    ],
+    "graph_derived": [],
+    "is_safe": false,
+    "peer_stats": null,
+    "rep_vector": {
+     "abuse_risk": 0.0,
+     "asn_owner": "Unknown",
+     "cl_afpe_similarity": 0.0,
+     "domain": "unlisted.example",
+     "first_seen": false,
+     "source_confidence": "medium",
+     "ti_risk": 0.0,
+     "tier": 3,
+     "verified_ioc": false,
+     "vt_detection_ratio": 0.0
+    },
+    "sources": {
+     "abuseipdb": "unavailable",
+     "geoip": "ok",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "unavailable",
+     "tranco": "disabled",
+     "virustotal": "unavailable",
+     "zeek": "ok"
+    },
+    "ts": 1800000000.0,
+    "windowed_v2": []
+   },
+   "kind": "benign",
+   "note": "target none; known gap until P3: owner review 2026-10-14 of a real alert: the decision engine alone says SUSPICIOUS here (B6: both families are Zeek-derived and count once), yet the alert reached HIGH -- path not yet traced (persistence escalation is the likely one) -- and said 'matched a known-bad signature directly'. A fingerprint-list hit is a client-fingerprint match, not a payload signature, and needs its hash, list source, exact-vs-similar and the SAME flow (uid / SNI) as the other evidence; a protocol notice is context; a destination-less relatedness test (the hypothesis's own evidence types define its anchor set) lets two destinations corroborate each other",
+   "origin": "scenario benign_certificate_traffic_ja3_and_protocol_notice (d3fend: D3-NTA; nist: 800-94:tuning, 800-61:analysis-related-evidence)",
+   "params": {
+    "familiarity_trust_bar": 0.6,
+    "hard_stop_candidate_sensitivity": null,
+    "peer_deviation_min_absolute_count": 5.0,
+    "peer_deviation_multiplier": 3.0,
+    "reputation_propagation_ttl_seconds": 86400.0,
+    "reputation_tier_high_floor": 4.0,
+    "reputation_tier_suspicious_floor": 2.0,
+    "resolved": true
+   },
+   "pinned": {
+    "action": "monitor",
+    "attack_hypothesis": [
+     "NETWORK_INTRUSION",
+     3.0
+    ],
+    "benign_hypothesis": [
+     "UNKNOWN_BENIGN",
+     0.0
+    ],
+    "containment_basis": null,
+    "decision_path": "hypothesis_suspicious",
+    "evidence_families": [
+     "network_behavior",
+     "tls_fingerprint"
+    ],
+    "evidence_types": [
+     "malicious_ja3",
+     "zeek_notice_medium"
+    ],
+    "hypothesis_destination_ids": [
+     "203.0.113.50",
+     "telemetry.example.net"
+    ],
+    "independent_sources": 1,
+    "single_signal_basis": null,
+    "state": "SUSPICIOUS"
+   },
+   "pinned_reason": "owner-review scenarios (2026-10-14): benign_large_transfer_dns_gap_tunnel and benign_certificate_traffic_ja3_and_protocol_notice pin today's level as known gaps",
+   "title": "Routine certificate-validation traffic with a protocol notice on one destination and a fingerprint-list hit tied to another destination's name"
+  },
+  {
+   "case_id": "scn:benign_certificate_traffic_ja3_and_protocol_notice@burst/off",
+   "expect": {
+    "containment": [
+     null
+    ],
+    "state_at_least": null,
+    "state_at_most": "SUSPICIOUS"
+   },
+   "gathered": {
+    "baseline_familiarity": 0.0,
+    "baseline_v2": [],
+    "device_id": "golden-device",
+    "device_type": "laptop",
+    "domain_age_v2": [],
+    "features": {
+     "zeek_honeypot_hits": 0
+    },
+    "fresh_v2": [
+     {
+      "confidence": 0.6,
+      "destination_id": "203.0.113.50",
+      "device_id": "golden-device",
+      "evidence_type": "zeek_notice_medium",
+      "features": {},
+      "independence_family": "network_behavior",
+      "provenance": "weird:QUIC_protocol_oddity",
+      "source": "golden-scenario",
+      "timestamp": 1800000000.0,
+      "value": 1.0
+     },
+     {
+      "confidence": 0.9,
+      "destination_id": "telemetry.example.net",
+      "device_id": "golden-device",
+      "evidence_type": "malicious_ja3",
+      "features": {},
+      "independence_family": "tls_fingerprint",
+      "provenance": "ja3:0123456789abcdef",
+      "source": "golden-scenario",
+      "timestamp": 1800000000.0,
+      "value": 1.0
+     }
+    ],
+    "graph_derived": [],
+    "is_safe": false,
+    "peer_stats": null,
+    "rep_vector": {
+     "abuse_risk": 0.0,
+     "asn_owner": "Unknown",
+     "cl_afpe_similarity": 0.0,
+     "domain": "unlisted.example",
+     "first_seen": false,
+     "source_confidence": "medium",
+     "ti_risk": 0.0,
+     "tier": 3,
+     "verified_ioc": false,
+     "vt_detection_ratio": 0.0
+    },
+    "sources": {
+     "abuseipdb": "disabled",
+     "geoip": "ok",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "disabled",
+     "tranco": "disabled",
+     "virustotal": "disabled",
+     "zeek": "ok"
+    },
+    "ts": 1800000000.0,
+    "windowed_v2": []
+   },
+   "kind": "benign",
+   "note": "target none; known gap until P3: owner review 2026-10-14 of a real alert: the decision engine alone says SUSPICIOUS here (B6: both families are Zeek-derived and count once), yet the alert reached HIGH -- path not yet traced (persistence escalation is the likely one) -- and said 'matched a known-bad signature directly'. A fingerprint-list hit is a client-fingerprint match, not a payload signature, and needs its hash, list source, exact-vs-similar and the SAME flow (uid / SNI) as the other evidence; a protocol notice is context; a destination-less relatedness test (the hypothesis's own evidence types define its anchor set) lets two destinations corroborate each other",
+   "origin": "scenario benign_certificate_traffic_ja3_and_protocol_notice (d3fend: D3-NTA; nist: 800-94:tuning, 800-61:analysis-related-evidence)",
+   "params": {
+    "familiarity_trust_bar": 0.6,
+    "hard_stop_candidate_sensitivity": null,
+    "peer_deviation_min_absolute_count": 5.0,
+    "peer_deviation_multiplier": 3.0,
+    "reputation_propagation_ttl_seconds": 86400.0,
+    "reputation_tier_high_floor": 4.0,
+    "reputation_tier_suspicious_floor": 2.0,
+    "resolved": true
+   },
+   "pinned": {
+    "action": "monitor",
+    "attack_hypothesis": [
+     "NETWORK_INTRUSION",
+     3.0
+    ],
+    "benign_hypothesis": [
+     "UNKNOWN_BENIGN",
+     0.0
+    ],
+    "containment_basis": null,
+    "decision_path": "hypothesis_suspicious",
+    "evidence_families": [
+     "network_behavior",
+     "tls_fingerprint"
+    ],
+    "evidence_types": [
+     "malicious_ja3",
+     "zeek_notice_medium"
+    ],
+    "hypothesis_destination_ids": [
+     "203.0.113.50",
+     "telemetry.example.net"
+    ],
+    "independent_sources": 1,
+    "single_signal_basis": null,
+    "state": "SUSPICIOUS"
+   },
+   "pinned_reason": "owner-review scenarios (2026-10-14): benign_large_transfer_dns_gap_tunnel and benign_certificate_traffic_ja3_and_protocol_notice pin today's level as known gaps",
+   "title": "Routine certificate-validation traffic with a protocol notice on one destination and a fingerprint-list hit tied to another destination's name"
   },
   {
    "case_id": "scn:benign_console_p2p@burst/failing",
@@ -3827,9 +4291,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "unavailable",
      "geoip": "ok",
-     "threat_feeds": "unavailable",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "unavailable",
+     "tranco": "disabled",
+     "virustotal": "unavailable",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -3922,9 +4392,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "disabled",
      "geoip": "ok",
-     "threat_feeds": "disabled",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "disabled",
+     "tranco": "disabled",
+     "virustotal": "disabled",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -4058,9 +4534,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "unavailable",
      "geoip": "ok",
-     "threat_feeds": "unavailable",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "unavailable",
+     "tranco": "disabled",
+     "virustotal": "unavailable",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -4190,9 +4672,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "disabled",
      "geoip": "ok",
-     "threat_feeds": "disabled",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "disabled",
+     "tranco": "disabled",
+     "virustotal": "disabled",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -4281,9 +4769,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "unavailable",
      "geoip": "ok",
-     "threat_feeds": "unavailable",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "unavailable",
+     "tranco": "disabled",
+     "virustotal": "unavailable",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -4372,9 +4866,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "disabled",
      "geoip": "ok",
-     "threat_feeds": "disabled",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "disabled",
+     "tranco": "disabled",
+     "virustotal": "disabled",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -4465,9 +4965,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "unavailable",
      "geoip": "ok",
-     "threat_feeds": "unavailable",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "unavailable",
+     "tranco": "disabled",
+     "virustotal": "unavailable",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -4564,9 +5070,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "disabled",
      "geoip": "ok",
-     "threat_feeds": "disabled",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "disabled",
+     "tranco": "disabled",
+     "virustotal": "disabled",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -4663,9 +5175,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "ok",
      "geoip": "ok",
-     "threat_feeds": "ok",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "ok",
+     "tranco": "disabled",
+     "virustotal": "ok",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -4711,6 +5229,242 @@
    },
    "pinned_reason": "scenario catalogue (2026-10-14): each pin is what the code at a3108be decides for the compiled spec, inside the spec's bounds",
    "title": "A feed error lists a name half the network uses (no behaviour at all)"
+  },
+  {
+   "case_id": "scn:benign_large_transfer_dns_gap_tunnel@burst/failing",
+   "expect": {
+    "containment": [
+     "corroborated",
+     null
+    ],
+    "state_at_least": null,
+    "state_at_most": "HIGH"
+   },
+   "gathered": {
+    "baseline_familiarity": 0.0,
+    "baseline_v2": [],
+    "device_id": "golden-device",
+    "device_type": "laptop",
+    "domain_age_v2": [],
+    "features": {
+     "zeek_honeypot_hits": 0
+    },
+    "fresh_v2": [
+     {
+      "confidence": 0.9,
+      "destination_id": "203.0.113.45",
+      "device_id": "golden-device",
+      "evidence_type": "zeek_exfiltration",
+      "features": {},
+      "independence_family": "data_transfer_pattern",
+      "provenance": "detector:threat_signals:zeek_exfiltration:massive:x",
+      "source": "golden-scenario",
+      "timestamp": 1800000000.0,
+      "value": 500000000
+     },
+     {
+      "confidence": 0.9,
+      "destination_id": "203.0.113.45",
+      "device_id": "golden-device",
+      "evidence_type": "dns_evasion_anomaly",
+      "features": {},
+      "independence_family": "dns_behavior",
+      "provenance": "detector:dns_evasion:no_dns_history:direct ip",
+      "source": "golden-scenario",
+      "timestamp": 1800000000.0,
+      "value": 1.0
+     }
+    ],
+    "graph_derived": [],
+    "is_safe": false,
+    "peer_stats": null,
+    "rep_vector": {
+     "abuse_risk": 0.0,
+     "asn_owner": "Unknown",
+     "cl_afpe_similarity": 0.0,
+     "domain": "unlisted.example",
+     "first_seen": false,
+     "source_confidence": "medium",
+     "ti_risk": 0.0,
+     "tier": 3,
+     "verified_ioc": false,
+     "vt_detection_ratio": 0.0
+    },
+    "sources": {
+     "abuseipdb": "unavailable",
+     "geoip": "ok",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "unavailable",
+     "tranco": "disabled",
+     "virustotal": "unavailable",
+     "zeek": "ok"
+    },
+    "ts": 1800000000.0,
+    "windowed_v2": []
+   },
+   "kind": "benign",
+   "note": "target none; known gap until P3: owner review 2026-10-14 of a real alert: a large transfer plus a DNS gap are counted as two independent attack families, reach HIGH DATA_EXFILTRATION and authorise containment (basis corroborated). Principles 1, 2 and 6: a volume anomaly is ANOMALOUS, an attribution gap contributes nothing, HIGH needs an attack-specific fact and the benign explanations (tunnel, wifi calling, backup, sync) evaluated. Containment side: pull the attack-specific requirement into the containment gate first (MASTER_TODO 0d, worked example 3)",
+   "origin": "scenario benign_large_transfer_dns_gap_tunnel (attack: T1572; d3fend: D3-PHDURA, D3-DNSTA; nist: 800-94:tuning, 800-94:evasion)",
+   "params": {
+    "familiarity_trust_bar": 0.6,
+    "hard_stop_candidate_sensitivity": null,
+    "peer_deviation_min_absolute_count": 5.0,
+    "peer_deviation_multiplier": 3.0,
+    "reputation_propagation_ttl_seconds": 86400.0,
+    "reputation_tier_high_floor": 4.0,
+    "reputation_tier_suspicious_floor": 2.0,
+    "resolved": true
+   },
+   "pinned": {
+    "action": "alert",
+    "attack_hypothesis": [
+     "DATA_EXFILTRATION",
+     4.0
+    ],
+    "benign_hypothesis": [
+     "UNKNOWN_BENIGN",
+     0.0
+    ],
+    "containment_basis": "corroborated",
+    "decision_path": "hypothesis_high",
+    "evidence_families": [
+     "data_transfer_pattern",
+     "dns_behavior"
+    ],
+    "evidence_types": [
+     "dns_evasion_anomaly",
+     "zeek_exfiltration"
+    ],
+    "hypothesis_destination_ids": [
+     "203.0.113.45"
+    ],
+    "independent_sources": 2,
+    "single_signal_basis": null,
+    "state": "HIGH"
+   },
+   "pinned_reason": "owner-review scenarios (2026-10-14): benign_large_transfer_dns_gap_tunnel and benign_certificate_traffic_ja3_and_protocol_notice pin today's level as known gaps",
+   "title": "A large encrypted upload to a direct address with no DNS lookup of it (a VPN / tunnel / wifi-calling-shaped flow, no attack fact)"
+  },
+  {
+   "case_id": "scn:benign_large_transfer_dns_gap_tunnel@burst/off",
+   "expect": {
+    "containment": [
+     "corroborated",
+     null
+    ],
+    "state_at_least": null,
+    "state_at_most": "HIGH"
+   },
+   "gathered": {
+    "baseline_familiarity": 0.0,
+    "baseline_v2": [],
+    "device_id": "golden-device",
+    "device_type": "laptop",
+    "domain_age_v2": [],
+    "features": {
+     "zeek_honeypot_hits": 0
+    },
+    "fresh_v2": [
+     {
+      "confidence": 0.9,
+      "destination_id": "203.0.113.45",
+      "device_id": "golden-device",
+      "evidence_type": "zeek_exfiltration",
+      "features": {},
+      "independence_family": "data_transfer_pattern",
+      "provenance": "detector:threat_signals:zeek_exfiltration:massive:x",
+      "source": "golden-scenario",
+      "timestamp": 1800000000.0,
+      "value": 500000000
+     },
+     {
+      "confidence": 0.9,
+      "destination_id": "203.0.113.45",
+      "device_id": "golden-device",
+      "evidence_type": "dns_evasion_anomaly",
+      "features": {},
+      "independence_family": "dns_behavior",
+      "provenance": "detector:dns_evasion:no_dns_history:direct ip",
+      "source": "golden-scenario",
+      "timestamp": 1800000000.0,
+      "value": 1.0
+     }
+    ],
+    "graph_derived": [],
+    "is_safe": false,
+    "peer_stats": null,
+    "rep_vector": {
+     "abuse_risk": 0.0,
+     "asn_owner": "Unknown",
+     "cl_afpe_similarity": 0.0,
+     "domain": "unlisted.example",
+     "first_seen": false,
+     "source_confidence": "medium",
+     "ti_risk": 0.0,
+     "tier": 3,
+     "verified_ioc": false,
+     "vt_detection_ratio": 0.0
+    },
+    "sources": {
+     "abuseipdb": "disabled",
+     "geoip": "ok",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "disabled",
+     "tranco": "disabled",
+     "virustotal": "disabled",
+     "zeek": "ok"
+    },
+    "ts": 1800000000.0,
+    "windowed_v2": []
+   },
+   "kind": "benign",
+   "note": "target none; known gap until P3: owner review 2026-10-14 of a real alert: a large transfer plus a DNS gap are counted as two independent attack families, reach HIGH DATA_EXFILTRATION and authorise containment (basis corroborated). Principles 1, 2 and 6: a volume anomaly is ANOMALOUS, an attribution gap contributes nothing, HIGH needs an attack-specific fact and the benign explanations (tunnel, wifi calling, backup, sync) evaluated. Containment side: pull the attack-specific requirement into the containment gate first (MASTER_TODO 0d, worked example 3)",
+   "origin": "scenario benign_large_transfer_dns_gap_tunnel (attack: T1572; d3fend: D3-PHDURA, D3-DNSTA; nist: 800-94:tuning, 800-94:evasion)",
+   "params": {
+    "familiarity_trust_bar": 0.6,
+    "hard_stop_candidate_sensitivity": null,
+    "peer_deviation_min_absolute_count": 5.0,
+    "peer_deviation_multiplier": 3.0,
+    "reputation_propagation_ttl_seconds": 86400.0,
+    "reputation_tier_high_floor": 4.0,
+    "reputation_tier_suspicious_floor": 2.0,
+    "resolved": true
+   },
+   "pinned": {
+    "action": "alert",
+    "attack_hypothesis": [
+     "DATA_EXFILTRATION",
+     4.0
+    ],
+    "benign_hypothesis": [
+     "UNKNOWN_BENIGN",
+     0.0
+    ],
+    "containment_basis": "corroborated",
+    "decision_path": "hypothesis_high",
+    "evidence_families": [
+     "data_transfer_pattern",
+     "dns_behavior"
+    ],
+    "evidence_types": [
+     "dns_evasion_anomaly",
+     "zeek_exfiltration"
+    ],
+    "hypothesis_destination_ids": [
+     "203.0.113.45"
+    ],
+    "independent_sources": 2,
+    "single_signal_basis": null,
+    "state": "HIGH"
+   },
+   "pinned_reason": "owner-review scenarios (2026-10-14): benign_large_transfer_dns_gap_tunnel and benign_certificate_traffic_ja3_and_protocol_notice pin today's level as known gaps",
+   "title": "A large encrypted upload to a direct address with no DNS lookup of it (a VPN / tunnel / wifi-calling-shaped flow, no attack fact)"
   },
   {
    "case_id": "scn:benign_lone_policy_signature@burst/failing",
@@ -4760,9 +5514,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "unavailable",
      "geoip": "ok",
-     "threat_feeds": "unavailable",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "unavailable",
+     "tranco": "disabled",
+     "virustotal": "unavailable",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -4857,9 +5617,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "disabled",
      "geoip": "ok",
-     "threat_feeds": "disabled",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "disabled",
+     "tranco": "disabled",
+     "virustotal": "disabled",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -4954,9 +5720,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "unavailable",
      "geoip": "ok",
-     "threat_feeds": "unavailable",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "unavailable",
+     "tranco": "disabled",
+     "virustotal": "unavailable",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -5051,9 +5823,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "disabled",
      "geoip": "ok",
-     "threat_feeds": "disabled",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "disabled",
+     "tranco": "disabled",
+     "virustotal": "disabled",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -5148,9 +5926,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "unavailable",
      "geoip": "ok",
-     "threat_feeds": "unavailable",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "unavailable",
+     "tranco": "disabled",
+     "virustotal": "unavailable",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -5243,9 +6027,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "disabled",
      "geoip": "ok",
-     "threat_feeds": "disabled",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "disabled",
+     "tranco": "disabled",
+     "virustotal": "disabled",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -5338,9 +6128,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "unavailable",
      "geoip": "ok",
-     "threat_feeds": "unavailable",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "unavailable",
+     "tranco": "disabled",
+     "virustotal": "unavailable",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -5435,9 +6231,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "disabled",
      "geoip": "ok",
-     "threat_feeds": "disabled",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "disabled",
+     "tranco": "disabled",
+     "virustotal": "disabled",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -5532,9 +6334,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "unavailable",
      "geoip": "ok",
-     "threat_feeds": "unavailable",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "unavailable",
+     "tranco": "disabled",
+     "virustotal": "unavailable",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -5629,9 +6437,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "disabled",
      "geoip": "ok",
-     "threat_feeds": "disabled",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "disabled",
+     "tranco": "disabled",
+     "virustotal": "disabled",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -5718,9 +6532,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "unavailable",
      "geoip": "ok",
-     "threat_feeds": "unavailable",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "unavailable",
+     "tranco": "disabled",
+     "virustotal": "unavailable",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -5801,9 +6621,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "disabled",
      "geoip": "ok",
-     "threat_feeds": "disabled",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "disabled",
+     "tranco": "disabled",
+     "virustotal": "disabled",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -5892,9 +6718,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "unavailable",
      "geoip": "ok",
-     "threat_feeds": "unavailable",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "unavailable",
+     "tranco": "disabled",
+     "virustotal": "unavailable",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -5989,9 +6821,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "disabled",
      "geoip": "ok",
-     "threat_feeds": "disabled",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "disabled",
+     "tranco": "disabled",
+     "virustotal": "disabled",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -6037,6 +6875,276 @@
    },
    "pinned_reason": "scenario catalogue (2026-10-14): each pin is what the code at a3108be decides for the compiled spec, inside the spec's bounds",
    "title": "An IoT device's regular check-in to its usual service"
+  },
+  {
+   "case_id": "scn:benign_shared_local_resolver_dns_gap_weak_notice@burst/failing",
+   "expect": {
+    "containment": [
+     null
+    ],
+    "state_at_least": null,
+    "state_at_most": "SUSPICIOUS"
+   },
+   "gathered": {
+    "baseline_familiarity": 0.0,
+    "baseline_v2": [],
+    "device_id": "golden-device",
+    "device_type": "smart_tv",
+    "domain_age_v2": [],
+    "features": {
+     "zeek_honeypot_hits": 0
+    },
+    "fresh_v2": [
+     {
+      "confidence": 0.9,
+      "destination_id": "198.51.100.134",
+      "device_id": "golden-device",
+      "evidence_type": "dns_evasion_anomaly",
+      "features": {},
+      "independence_family": "dns_behavior",
+      "provenance": "detector:dns_evasion:no_dns_history:x",
+      "source": "golden-scenario",
+      "timestamp": 1800000000.0,
+      "value": 1.0
+     },
+     {
+      "confidence": 0.4,
+      "destination_id": "203.0.113.1",
+      "device_id": "golden-device",
+      "evidence_type": "zeek_notice_weak",
+      "features": {},
+      "independence_family": "network_behavior",
+      "provenance": "weird:window_recision",
+      "source": "golden-scenario",
+      "timestamp": 1800000000.0,
+      "value": 1.0
+     }
+    ],
+    "graph_derived": [
+     {
+      "evidence": {
+       "confidence": 1.0,
+       "destination_id": "192.0.2.41",
+       "device_id": "golden-device",
+       "evidence_type": "coordinated_targeting",
+       "features": {
+        "other_devices": [
+         "peer-1",
+         "peer-2"
+        ]
+       },
+       "independence_family": "cross_device_correlation",
+       "provenance": "v13_live_engine:coordinated_targeting",
+       "source": "golden-scenario",
+       "timestamp": 1800000000.0,
+       "value": 3.0
+      }
+     }
+    ],
+    "is_safe": false,
+    "peer_stats": null,
+    "rep_vector": {
+     "abuse_risk": 0.0,
+     "asn_owner": "Unknown",
+     "cl_afpe_similarity": 0.0,
+     "domain": "unlisted.example",
+     "first_seen": false,
+     "source_confidence": "medium",
+     "ti_risk": 0.0,
+     "tier": 3,
+     "verified_ioc": false,
+     "vt_detection_ratio": 0.0
+    },
+    "sources": {
+     "abuseipdb": "unavailable",
+     "geoip": "ok",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "unavailable",
+     "tranco": "disabled",
+     "virustotal": "unavailable",
+     "zeek": "ok"
+    },
+    "ts": 1800000000.0,
+    "windowed_v2": []
+   },
+   "kind": "benign",
+   "note": "target none; known gap until P2: owner review 2026-10-14 of a real alert (HIGH COORDINATED_TARGETING, three destinations, a LAN resolver on port 53): evidence about three different destinations was presented as three independent families. In the decision engine today this mix is SUSPICIOUS (the shared item is stripped by the anchor filter); how the real alert reached HIGH is not yet traced (the LAN-destination exclusion has been live since 2026-09-29, so the alert may predate it or came through another path)",
+   "origin": "scenario benign_shared_local_resolver_dns_gap_weak_notice (d3fend: D3-NTCD, D3-DNSTA; nist: 800-94:tuning, 800-94:benign-mass-event)",
+   "params": {
+    "familiarity_trust_bar": 0.6,
+    "hard_stop_candidate_sensitivity": null,
+    "peer_deviation_min_absolute_count": 5.0,
+    "peer_deviation_multiplier": 3.0,
+    "reputation_propagation_ttl_seconds": 86400.0,
+    "reputation_tier_high_floor": 4.0,
+    "reputation_tier_suspicious_floor": 2.0,
+    "resolved": true
+   },
+   "pinned": {
+    "action": "monitor",
+    "attack_hypothesis": [
+     "DNS_EVASION",
+     4.0
+    ],
+    "benign_hypothesis": [
+     "UNKNOWN_BENIGN",
+     0.0
+    ],
+    "containment_basis": null,
+    "decision_path": "hypothesis_suspicious",
+    "evidence_families": [
+     "dns_behavior"
+    ],
+    "evidence_types": [
+     "dns_evasion_anomaly"
+    ],
+    "hypothesis_destination_ids": [
+     "198.51.100.134"
+    ],
+    "independent_sources": 1,
+    "single_signal_basis": null,
+    "state": "SUSPICIOUS"
+   },
+   "pinned_reason": "owner-review scenarios (2026-10-14): three real-shaped alerts pin today's level as known gaps",
+   "title": "Several devices use the same LAN resolver; one has a DNS attribution gap on an unrelated address and a weak protocol notice on a third"
+  },
+  {
+   "case_id": "scn:benign_shared_local_resolver_dns_gap_weak_notice@burst/off",
+   "expect": {
+    "containment": [
+     null
+    ],
+    "state_at_least": null,
+    "state_at_most": "SUSPICIOUS"
+   },
+   "gathered": {
+    "baseline_familiarity": 0.0,
+    "baseline_v2": [],
+    "device_id": "golden-device",
+    "device_type": "smart_tv",
+    "domain_age_v2": [],
+    "features": {
+     "zeek_honeypot_hits": 0
+    },
+    "fresh_v2": [
+     {
+      "confidence": 0.9,
+      "destination_id": "198.51.100.134",
+      "device_id": "golden-device",
+      "evidence_type": "dns_evasion_anomaly",
+      "features": {},
+      "independence_family": "dns_behavior",
+      "provenance": "detector:dns_evasion:no_dns_history:x",
+      "source": "golden-scenario",
+      "timestamp": 1800000000.0,
+      "value": 1.0
+     },
+     {
+      "confidence": 0.4,
+      "destination_id": "203.0.113.1",
+      "device_id": "golden-device",
+      "evidence_type": "zeek_notice_weak",
+      "features": {},
+      "independence_family": "network_behavior",
+      "provenance": "weird:window_recision",
+      "source": "golden-scenario",
+      "timestamp": 1800000000.0,
+      "value": 1.0
+     }
+    ],
+    "graph_derived": [
+     {
+      "evidence": {
+       "confidence": 1.0,
+       "destination_id": "192.0.2.41",
+       "device_id": "golden-device",
+       "evidence_type": "coordinated_targeting",
+       "features": {
+        "other_devices": [
+         "peer-1",
+         "peer-2"
+        ]
+       },
+       "independence_family": "cross_device_correlation",
+       "provenance": "v13_live_engine:coordinated_targeting",
+       "source": "golden-scenario",
+       "timestamp": 1800000000.0,
+       "value": 3.0
+      }
+     }
+    ],
+    "is_safe": false,
+    "peer_stats": null,
+    "rep_vector": {
+     "abuse_risk": 0.0,
+     "asn_owner": "Unknown",
+     "cl_afpe_similarity": 0.0,
+     "domain": "unlisted.example",
+     "first_seen": false,
+     "source_confidence": "medium",
+     "ti_risk": 0.0,
+     "tier": 3,
+     "verified_ioc": false,
+     "vt_detection_ratio": 0.0
+    },
+    "sources": {
+     "abuseipdb": "disabled",
+     "geoip": "ok",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "disabled",
+     "tranco": "disabled",
+     "virustotal": "disabled",
+     "zeek": "ok"
+    },
+    "ts": 1800000000.0,
+    "windowed_v2": []
+   },
+   "kind": "benign",
+   "note": "target none; known gap until P2: owner review 2026-10-14 of a real alert (HIGH COORDINATED_TARGETING, three destinations, a LAN resolver on port 53): evidence about three different destinations was presented as three independent families. In the decision engine today this mix is SUSPICIOUS (the shared item is stripped by the anchor filter); how the real alert reached HIGH is not yet traced (the LAN-destination exclusion has been live since 2026-09-29, so the alert may predate it or came through another path)",
+   "origin": "scenario benign_shared_local_resolver_dns_gap_weak_notice (d3fend: D3-NTCD, D3-DNSTA; nist: 800-94:tuning, 800-94:benign-mass-event)",
+   "params": {
+    "familiarity_trust_bar": 0.6,
+    "hard_stop_candidate_sensitivity": null,
+    "peer_deviation_min_absolute_count": 5.0,
+    "peer_deviation_multiplier": 3.0,
+    "reputation_propagation_ttl_seconds": 86400.0,
+    "reputation_tier_high_floor": 4.0,
+    "reputation_tier_suspicious_floor": 2.0,
+    "resolved": true
+   },
+   "pinned": {
+    "action": "monitor",
+    "attack_hypothesis": [
+     "DNS_EVASION",
+     4.0
+    ],
+    "benign_hypothesis": [
+     "UNKNOWN_BENIGN",
+     0.0
+    ],
+    "containment_basis": null,
+    "decision_path": "hypothesis_suspicious",
+    "evidence_families": [
+     "dns_behavior"
+    ],
+    "evidence_types": [
+     "dns_evasion_anomaly"
+    ],
+    "hypothesis_destination_ids": [
+     "198.51.100.134"
+    ],
+    "independent_sources": 1,
+    "single_signal_basis": null,
+    "state": "SUSPICIOUS"
+   },
+   "pinned_reason": "owner-review scenarios (2026-10-14): three real-shaped alerts pin today's level as known gaps",
+   "title": "Several devices use the same LAN resolver; one has a DNS attribution gap on an unrelated address and a weak protocol notice on a third"
   },
   {
    "case_id": "scn:benign_shared_update_host@burst/failing",
@@ -6088,9 +7196,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "unavailable",
      "geoip": "ok",
-     "threat_feeds": "unavailable",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "unavailable",
+     "tranco": "disabled",
+     "virustotal": "unavailable",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -6187,9 +7301,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "disabled",
      "geoip": "ok",
-     "threat_feeds": "disabled",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "disabled",
+     "tranco": "disabled",
+     "virustotal": "disabled",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -6284,9 +7404,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "unavailable",
      "geoip": "ok",
-     "threat_feeds": "unavailable",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "unavailable",
+     "tranco": "disabled",
+     "virustotal": "unavailable",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -6375,9 +7501,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "disabled",
      "geoip": "ok",
-     "threat_feeds": "disabled",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "disabled",
+     "tranco": "disabled",
+     "virustotal": "disabled",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -6466,9 +7598,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "unavailable",
      "geoip": "ok",
-     "threat_feeds": "unavailable",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "unavailable",
+     "tranco": "disabled",
+     "virustotal": "unavailable",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -6561,9 +7699,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "disabled",
      "geoip": "ok",
-     "threat_feeds": "disabled",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "disabled",
+     "tranco": "disabled",
+     "virustotal": "disabled",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -6656,9 +7800,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "ok",
      "geoip": "ok",
-     "threat_feeds": "ok",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "ok",
+     "tranco": "disabled",
+     "virustotal": "ok",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -6763,9 +7913,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "unavailable",
      "geoip": "ok",
-     "threat_feeds": "unavailable",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "unavailable",
+     "tranco": "disabled",
+     "virustotal": "unavailable",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -6866,9 +8022,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "disabled",
      "geoip": "ok",
-     "threat_feeds": "disabled",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "disabled",
+     "tranco": "disabled",
+     "virustotal": "disabled",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -6957,9 +8119,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "unavailable",
      "geoip": "ok",
-     "threat_feeds": "unavailable",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "unavailable",
+     "tranco": "disabled",
+     "virustotal": "unavailable",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -7054,9 +8222,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "disabled",
      "geoip": "ok",
-     "threat_feeds": "disabled",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "disabled",
+     "tranco": "disabled",
+     "virustotal": "disabled",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -7161,9 +8335,15 @@
      "vt_detection_ratio": 1.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "ok",
      "geoip": "ok",
-     "threat_feeds": "ok",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "ok",
+     "tranco": "disabled",
+     "virustotal": "ok",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -7260,9 +8440,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "unavailable",
      "geoip": "ok",
-     "threat_feeds": "unavailable",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "unavailable",
+     "tranco": "disabled",
+     "virustotal": "unavailable",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -7351,9 +8537,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "disabled",
      "geoip": "ok",
-     "threat_feeds": "disabled",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "disabled",
+     "tranco": "disabled",
+     "virustotal": "disabled",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -7442,9 +8634,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "unavailable",
      "geoip": "ok",
-     "threat_feeds": "unavailable",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "unavailable",
+     "tranco": "disabled",
+     "virustotal": "unavailable",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -7533,9 +8731,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "disabled",
      "geoip": "ok",
-     "threat_feeds": "disabled",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "disabled",
+     "tranco": "disabled",
+     "virustotal": "disabled",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -7636,9 +8840,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "unavailable",
      "geoip": "ok",
-     "threat_feeds": "unavailable",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "unavailable",
+     "tranco": "disabled",
+     "virustotal": "unavailable",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -7746,9 +8956,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "disabled",
      "geoip": "ok",
-     "threat_feeds": "disabled",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "disabled",
+     "tranco": "disabled",
+     "virustotal": "disabled",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -7866,9 +9082,15 @@
      "vt_detection_ratio": 1.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "ok",
      "geoip": "ok",
-     "threat_feeds": "ok",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "ok",
+     "tranco": "disabled",
+     "virustotal": "ok",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -7966,9 +9188,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "unavailable",
      "geoip": "ok",
-     "threat_feeds": "unavailable",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "unavailable",
+     "tranco": "disabled",
+     "virustotal": "unavailable",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -8063,9 +9291,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "disabled",
      "geoip": "ok",
-     "threat_feeds": "disabled",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "disabled",
+     "tranco": "disabled",
+     "virustotal": "disabled",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -8172,9 +9406,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "unavailable",
      "geoip": "ok",
-     "threat_feeds": "unavailable",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "unavailable",
+     "tranco": "disabled",
+     "virustotal": "unavailable",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -8281,9 +9521,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "disabled",
      "geoip": "ok",
-     "threat_feeds": "disabled",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "disabled",
+     "tranco": "disabled",
+     "virustotal": "disabled",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -8400,9 +9646,15 @@
      "vt_detection_ratio": 1.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "ok",
      "geoip": "ok",
-     "threat_feeds": "ok",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "ok",
+     "tranco": "disabled",
+     "virustotal": "ok",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -8499,9 +9751,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "unavailable",
      "geoip": "ok",
-     "threat_feeds": "unavailable",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "unavailable",
+     "tranco": "disabled",
+     "virustotal": "unavailable",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -8596,9 +9854,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "disabled",
      "geoip": "ok",
-     "threat_feeds": "disabled",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "disabled",
+     "tranco": "disabled",
+     "virustotal": "disabled",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -8703,9 +9967,15 @@
      "vt_detection_ratio": 1.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "ok",
      "geoip": "ok",
-     "threat_feeds": "ok",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "ok",
+     "tranco": "disabled",
+     "virustotal": "ok",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -8815,9 +10085,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "unavailable",
      "geoip": "ok",
-     "threat_feeds": "unavailable",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "unavailable",
+     "tranco": "disabled",
+     "virustotal": "unavailable",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -8925,9 +10201,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "disabled",
      "geoip": "ok",
-     "threat_feeds": "disabled",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "disabled",
+     "tranco": "disabled",
+     "virustotal": "disabled",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -9045,9 +10327,15 @@
      "vt_detection_ratio": 1.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "ok",
      "geoip": "ok",
-     "threat_feeds": "ok",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "ok",
+     "tranco": "disabled",
+     "virustotal": "ok",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -9156,9 +10444,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "unavailable",
      "geoip": "ok",
-     "threat_feeds": "unavailable",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "unavailable",
+     "tranco": "disabled",
+     "virustotal": "unavailable",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -9265,9 +10559,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "disabled",
      "geoip": "ok",
-     "threat_feeds": "disabled",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "disabled",
+     "tranco": "disabled",
+     "virustotal": "disabled",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -9372,9 +10672,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "unavailable",
      "geoip": "ok",
-     "threat_feeds": "unavailable",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "unavailable",
+     "tranco": "disabled",
+     "virustotal": "unavailable",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -9477,9 +10783,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "disabled",
      "geoip": "ok",
-     "threat_feeds": "disabled",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "disabled",
+     "tranco": "disabled",
+     "virustotal": "disabled",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -9572,9 +10884,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "unavailable",
      "geoip": "ok",
-     "threat_feeds": "unavailable",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "unavailable",
+     "tranco": "disabled",
+     "virustotal": "unavailable",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -9669,9 +10987,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "disabled",
      "geoip": "ok",
-     "threat_feeds": "disabled",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "disabled",
+     "tranco": "disabled",
+     "virustotal": "disabled",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -9766,9 +11090,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "ok",
      "geoip": "ok",
-     "threat_feeds": "ok",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "ok",
+     "tranco": "disabled",
+     "virustotal": "ok",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -9878,9 +11208,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "unavailable",
      "geoip": "ok",
-     "threat_feeds": "unavailable",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "unavailable",
+     "tranco": "disabled",
+     "virustotal": "unavailable",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -9992,9 +11328,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "disabled",
      "geoip": "ok",
-     "threat_feeds": "disabled",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "disabled",
+     "tranco": "disabled",
+     "virustotal": "disabled",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -10101,9 +11443,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "unavailable",
      "geoip": "ok",
-     "threat_feeds": "unavailable",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "unavailable",
+     "tranco": "disabled",
+     "virustotal": "unavailable",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -10208,9 +11556,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "disabled",
      "geoip": "ok",
-     "threat_feeds": "disabled",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "disabled",
+     "tranco": "disabled",
+     "virustotal": "disabled",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -10310,9 +11664,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "unavailable",
      "geoip": "ok",
-     "threat_feeds": "unavailable",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "unavailable",
+     "tranco": "disabled",
+     "virustotal": "unavailable",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -10410,9 +11770,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "disabled",
      "geoip": "ok",
-     "threat_feeds": "disabled",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "disabled",
+     "tranco": "disabled",
+     "virustotal": "disabled",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -10505,9 +11871,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "unavailable",
      "geoip": "ok",
-     "threat_feeds": "unavailable",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "unavailable",
+     "tranco": "disabled",
+     "virustotal": "unavailable",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -10615,9 +11987,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "disabled",
      "geoip": "ok",
-     "threat_feeds": "disabled",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "disabled",
+     "tranco": "disabled",
+     "virustotal": "disabled",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -10725,9 +12103,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "unavailable",
      "geoip": "ok",
-     "threat_feeds": "unavailable",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "unavailable",
+     "tranco": "disabled",
+     "virustotal": "unavailable",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -10833,9 +12217,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "disabled",
      "geoip": "ok",
-     "threat_feeds": "disabled",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "disabled",
+     "tranco": "disabled",
+     "virustotal": "disabled",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -10941,9 +12331,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "unavailable",
      "geoip": "ok",
-     "threat_feeds": "unavailable",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "unavailable",
+     "tranco": "disabled",
+     "virustotal": "unavailable",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -11051,9 +12447,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "disabled",
      "geoip": "ok",
-     "threat_feeds": "disabled",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "disabled",
+     "tranco": "disabled",
+     "virustotal": "disabled",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -11161,9 +12563,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "unavailable",
      "geoip": "ok",
-     "threat_feeds": "unavailable",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "unavailable",
+     "tranco": "disabled",
+     "virustotal": "unavailable",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -11271,9 +12679,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "disabled",
      "geoip": "ok",
-     "threat_feeds": "disabled",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "disabled",
+     "tranco": "disabled",
+     "virustotal": "disabled",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -11381,9 +12795,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "unavailable",
      "geoip": "ok",
-     "threat_feeds": "unavailable",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "unavailable",
+     "tranco": "disabled",
+     "virustotal": "unavailable",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -11476,9 +12896,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "disabled",
      "geoip": "ok",
-     "threat_feeds": "disabled",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "disabled",
+     "tranco": "disabled",
+     "virustotal": "disabled",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -11571,9 +12997,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "ok",
      "geoip": "ok",
-     "threat_feeds": "ok",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "ok",
+     "tranco": "disabled",
+     "virustotal": "ok",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -11666,9 +13098,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "ok",
      "geoip": "ok",
-     "threat_feeds": "ok",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "ok",
+     "tranco": "disabled",
+     "virustotal": "ok",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -11776,9 +13214,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "ok",
      "geoip": "ok",
-     "threat_feeds": "ok",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "ok",
+     "tranco": "disabled",
+     "virustotal": "ok",
      "zeek": "ok"
     },
     "ts": 1800000000.0,
@@ -11883,9 +13327,15 @@
      "vt_detection_ratio": 0.0
     },
     "sources": {
-     "dns": "ok",
+     "abuseipdb": "ok",
      "geoip": "ok",
-     "threat_feeds": "ok",
+     "pihole": "ok",
+     "rdap": "disabled",
+     "reactive_capture": "disabled",
+     "suricata": "disabled",
+     "threat_intel": "ok",
+     "tranco": "disabled",
+     "virustotal": "ok",
      "zeek": "ok"
     },
     "ts": 1800000000.0,

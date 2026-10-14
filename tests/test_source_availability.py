@@ -112,5 +112,64 @@ import json  # noqa: E402
 persisted = json.loads((tmp / "sa_trans.json").read_text(encoding="utf-8"))
 check("the snapshot is written for other processes", persisted["y"]["state"] == UNAVAILABLE)
 
+# --- Suricata, reactive capture, RDAP domain age, Tranco (2026-10-14: each from its own status API) -------------------------
+def build2(*, config=None, health=(True, "ok"), health_calls=None, capture="ok", rdap="ok", tranco="ok", no_capture=False):
+    def health_fn():
+        if health_calls is not None:
+            health_calls.append(1)
+        return health
+    dispatcher = None if no_capture else SimpleNamespace(disk_degraded=(capture == "degraded"))
+    rdap_obj = {"ok": SimpleNamespace(status=lambda: {"enabled": True, "used_today": 3, "daily_cap": 50}),
+                "off": SimpleNamespace(status=lambda: {"enabled": False, "used_today": 0, "daily_cap": 50}),
+                "cap": SimpleNamespace(status=lambda: {"enabled": True, "used_today": 50, "daily_cap": 50}),
+                "none": None}[rdap]
+    tr = {"ok": {"enabled": True, "ranks_loaded": 1000}, "off": {"enabled": False, "ranks_loaded": 0},
+          "empty": {"enabled": True, "ranks_loaded": 0}}[tranco]
+    ti_e = SimpleNamespace(check_status=lambda now=None: (True, ""), tranco_status=lambda: tr)
+    return build_source_availability(
+        config=config or {}, zeek_collector=SimpleNamespace(is_available=lambda: True), ti_engine=ti_e,
+        geoip_engine=SimpleNamespace(reader=object(), asn_reader=object(), iptoasn=None),
+        abuseipdb=SimpleNamespace(active=True), virustotal=SimpleNamespace(active=False),
+        heartbeats=lambda: {"pihole_poll": {"last_success": NOW - 10}}, state_dir=tmp,
+        reactive_capture=dispatcher, rdap=lambda: rdap_obj, suricata_health=health_fn)
+
+
+CAP_ON = {"reactive_capture_enabled": True}
+SUR_ON = {"reactive_capture_enabled": True, "reactive_capture_suricata_enabled": True}
+s2 = states(build2())
+check("the new sources are reported", {"suricata", "reactive_capture", "rdap", "tranco"} <= set(s2), str(sorted(s2)))
+check("reactive capture switched off (the default) -> disabled", s2["reactive_capture"] == DISABLED, s2["reactive_capture"])
+check("reactive capture on and not disk-degraded -> ok", states(build2(config=CAP_ON))["reactive_capture"] == OK)
+check("reactive capture on but its disk budget is exhausted -> degraded",
+      states(build2(config=CAP_ON, capture="degraded"))["reactive_capture"] == DEGRADED)
+check("reactive capture on but no dispatcher -> unavailable", states(build2(config=CAP_ON, no_capture=True))["reactive_capture"] == UNAVAILABLE)
+check("suricata off (the default) -> disabled", s2["suricata"] == DISABLED, s2["suricata"])
+check("suricata on but reactive capture off (it only ever scans bursts) -> disabled",
+      states(build2(config={"reactive_capture_suricata_enabled": True}))["suricata"] == DISABLED)
+check("suricata on, binary and rules healthy -> ok", states(build2(config=SUR_ON))["suricata"] == OK)
+check("suricata on but the health probe fails -> unavailable, with the reason",
+      states(build2(config=SUR_ON, health=(False, "binary not found")))["suricata"] == UNAVAILABLE
+      and "binary not found" in build2(config=SUR_ON, health=(False, "binary not found")).details(NOW)["suricata"]["detail"])
+calls = []
+av = build2(config=SUR_ON, health_calls=calls)
+for dt in (0, 31, 100, 500):
+    av.snapshot(NOW + dt)
+check("the suricata probe (a subprocess) runs at most every 10 minutes, not on every 30 s snapshot", len(calls) == 1, str(len(calls)))
+av.snapshot(NOW + 700)
+check("... and again after that", len(calls) == 2, str(len(calls)))
+calls2 = []
+build2(config={}, health_calls=calls2).snapshot(NOW)
+check("a disabled suricata never runs its probe", calls2 == [])
+check("rdap switched off (the opt-in default) -> disabled", states(build2(rdap="off"))["rdap"] == DISABLED)
+check("rdap on and under its cap -> ok", states(build2(rdap="ok"))["rdap"] == OK)
+check("rdap at its daily cap -> degraded (new names are not looked up until tomorrow)", states(build2(rdap="cap"))["rdap"] == DEGRADED)
+check("rdap service not built -> unavailable", states(build2(rdap="none"))["rdap"] == UNAVAILABLE)
+check("tranco switched off (the default) -> disabled", states(build2(tranco="off"))["tranco"] == DISABLED)
+check("tranco on with its ranks loaded -> ok", states(build2())["tranco"] == OK)
+check("tranco on but nothing loaded yet -> degraded", states(build2(tranco="empty"))["tranco"] == DEGRADED)
+check("a caller that passes none of the new inputs still builds (older call sites)",
+      "rdap" in states(build_source_availability(config={}, zeek_collector=None, ti_engine=None, geoip_engine=None,
+                                                 abuseipdb=None, virustotal=None, heartbeats=lambda: {}, state_dir=tmp)))
+
 print("SOURCE AVAILABILITY", "OK" if not FAILURES else f"FAILED {FAILURES}")
 sys.exit(1 if FAILURES else 0)

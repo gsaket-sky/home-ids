@@ -156,11 +156,83 @@ def _client_check(client) -> Check:
     return check
 
 
+def _reactive_capture_check(config: Mapping[str, Any], dispatcher) -> Check:
+    def check(now):
+        if not config.get("reactive_capture_enabled", False):
+            return DISABLED, "switched off"
+        if dispatcher is None:
+            return UNAVAILABLE, "no dispatcher"
+        if getattr(dispatcher, "disk_degraded", False):
+            return DEGRADED, "disk budget exhausted; bursts are deferred"
+        return OK, "enabled"
+    return check
+
+
+def _suricata_check(config: Mapping[str, Any], health: Callable[[], Tuple[bool, str]], recheck_seconds: float) -> Check:
+    """Suricata only ever scans captured bursts, so it needs reactive capture too. Its health probe runs the binary, so it
+    is cached far longer than the 30 s snapshot."""
+    cache: Dict[str, Any] = {"at": None, "result": (False, "not probed")}
+
+    def check(now):
+        if not config.get("reactive_capture_suricata_enabled", False):
+            return DISABLED, "switched off"
+        if not config.get("reactive_capture_enabled", False):
+            return DISABLED, "reactive capture is off (Suricata only scans captured bursts)"
+        if cache["at"] is None or now - cache["at"] >= recheck_seconds or now < cache["at"]:
+            cache["result"] = health()
+            cache["at"] = now
+        healthy, reason = cache["result"]
+        return (OK, reason) if healthy else (UNAVAILABLE, reason)
+    return check
+
+
+def _rdap_check(get_service: Callable[[], Any]) -> Check:
+    def check(now):
+        service = get_service()
+        if service is None:
+            return UNAVAILABLE, "service not built"
+        status = service.status()
+        if not status.get("enabled"):
+            return DISABLED, "switched off (opt-in)"
+        used, cap = int(status.get("used_today") or 0), int(status.get("daily_cap") or 0)
+        if cap and used >= cap:
+            return DEGRADED, "daily lookup cap reached; new names are not looked up until tomorrow"
+        return OK, f"{used}/{cap} lookups today"
+    return check
+
+
+def _tranco_check(engine) -> Check:
+    def check(now):
+        if engine is None:
+            return UNAVAILABLE, "no threat-intel engine"
+        status = engine.tranco_status()
+        if not status.get("enabled"):
+            return DISABLED, "switched off"
+        loaded = int(status.get("ranks_loaded") or 0)
+        return (OK, f"{loaded} ranks loaded") if loaded else (DEGRADED, "enabled but no list loaded yet")
+    return check
+
+
+def _default_suricata_health(config: Mapping[str, Any]) -> Callable[[], Tuple[bool, str]]:
+    def health():
+        from intelligence.detectors.suricata_scan import check_suricata_health
+        return check_suricata_health(config.get("reactive_capture_suricata_bin", "/usr/bin/suricata"),
+                                     config.get("reactive_capture_suricata_rules_path", ""))
+    return health
+
+
+SURICATA_RECHECK_SECONDS = 600.0
+
+
 def build_source_availability(*, config: Mapping[str, Any], zeek_collector, ti_engine, geoip_engine, abuseipdb,
                               virustotal, heartbeats: Callable[[], Mapping[str, Mapping[str, Any]]],
-                              state_dir: Path, ttl_seconds: float = DEFAULT_TTL_SECONDS) -> SourceAvailability:
-    """The registry the engine runs: Zeek, the DNS source (Pi-hole poll), GeoIP, the threat-intel feeds, AbuseIPDB and
-    VirusTotal. `heartbeats` returns the cross-process component heartbeats (core.heartbeat.read_component_heartbeats)."""
+                              state_dir: Path, ttl_seconds: float = DEFAULT_TTL_SECONDS, reactive_capture=None,
+                              rdap: Optional[Callable[[], Any]] = None,
+                              suricata_health: Optional[Callable[[], Tuple[bool, str]]] = None) -> SourceAvailability:
+    """The registry the engine runs: Zeek, the DNS source (Pi-hole poll), GeoIP, the threat-intel feeds, AbuseIPDB,
+    VirusTotal, reactive capture, Suricata, RDAP domain age and Tranco. `heartbeats` returns the cross-process component
+    heartbeats (core.heartbeat.read_component_heartbeats); `rdap` returns the RDAP service lazily (it is built after this
+    registry); `suricata_health` defaults to the real binary / rules probe."""
     av = SourceAvailability(ttl_seconds=ttl_seconds, state_path=Path(state_dir) / "source_availability.json")
     av.register("zeek", _zeek_check(zeek_collector))
     av.register("pihole", _heartbeat_check(heartbeats, "pihole_poll"))
@@ -168,4 +240,9 @@ def build_source_availability(*, config: Mapping[str, Any], zeek_collector, ti_e
     av.register("threat_intel", _feeds_check(ti_engine))
     av.register("abuseipdb", _client_check(abuseipdb))
     av.register("virustotal", _client_check(virustotal))
+    av.register("reactive_capture", _reactive_capture_check(config, reactive_capture))
+    av.register("suricata", _suricata_check(config, suricata_health or _default_suricata_health(config),
+                                            SURICATA_RECHECK_SECONDS))
+    av.register("rdap", _rdap_check(rdap or (lambda: None)))
+    av.register("tranco", _tranco_check(ti_engine))
     return av

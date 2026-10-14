@@ -68,7 +68,7 @@ def cycle(fresh=(), *, rep_vector=None, device_type="laptop", features=None, is_
         rep_vector=rep_vector if rep_vector is not None else neutral(), fresh_v2=tuple(fresh),
         windowed_v2=tuple(windowed), graph_derived=tuple(derived), peer_stats=peer, baseline_v2=tuple(baseline),
         domain_age_v2=tuple(domain_age),
-        sources=MappingProxyType({"zeek": "ok", "dns": "ok", "geoip": "ok", "threat_feeds": "ok"}))
+        sources=MappingProxyType(scenarios.registry_sources("on")))
 
 
 def case(case_id, title, kind, origin, gathered, expect, note=""):

@@ -47,6 +47,18 @@ check("the ATT&CK scope file records its pinned source and rule",
 check("the D3FEND claims record their pinned ontology",
       len(json.loads(coverage.D3FEND_PATH.read_text(encoding="utf-8"))["source"]["sha256"]) == 64)
 
+# --- the sources a case records are the registry's own ----------------------------------------------------------------
+import tempfile  # noqa: E402
+from core.source_availability import build_source_availability  # noqa: E402
+
+registry = build_source_availability(
+    config={}, zeek_collector=None, ti_engine=None, geoip_engine=None, abuseipdb=None, virustotal=None,
+    heartbeats=lambda: {}, state_dir=_P(tempfile.mkdtemp(prefix="scn_sources_")))
+registered = set(registry.snapshot(0.0))
+for _intel in scenarios.INTEL_SETUPS:
+    check(f"the {_intel!r} intel setup names exactly the registry's sources",
+          set(scenarios.registry_sources(_intel)) == registered, sorted(set(scenarios.registry_sources(_intel)) ^ registered))
+
 # --- spec <-> frozen golden ------------------------------------------------------------------------------------------
 frozen = {c.case_id: c for c in guard.load_cases()}
 compiled = scenarios.compile_all(scs)

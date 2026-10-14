@@ -46,8 +46,16 @@ SHAPES = ("burst", "spread", "slow")
 INTEL_SETUPS = ("off", "failing", "on")
 OUTCOMES = ("none", "watch", "alert", "contain")
 PHASES = ("P1", "P2", "P3", "P3b", "P4", "P5", "identity")
-_SOURCES_BASE = {"zeek": "ok", "dns": "ok", "geoip": "ok"}
-_FEED_STATE = {"off": "disabled", "failing": "unavailable", "on": "ok"}
+# The source names are the registry's own (core/source_availability.py) and its defaults: the sensors up, the optional
+# reputation sources as the intel setup says, everything opt-in (reactive capture, Suricata, RDAP, Tranco) switched off.
+_INTEL_STATE = {"off": "disabled", "failing": "unavailable", "on": "ok"}
+
+
+def registry_sources(intel: str) -> Dict[str, str]:
+    state = _INTEL_STATE[intel]
+    return {"zeek": "ok", "pihole": "ok", "geoip": "ok", "threat_intel": state, "abuseipdb": state, "virustotal": state,
+            "reactive_capture": "disabled", "suricata": "disabled", "rdap": "disabled", "tranco": "disabled"}
+
 
 _classifier = ReputationClassifier()
 
@@ -161,7 +169,7 @@ def compile_case(sc: Scenario, shape: str, intel: str) -> GoldenCase:
         peer_stats=PeerStats(**peer) if peer else None,
         baseline_v2=tuple(_evidence(i, entities, T0) for i in ctx.get("baseline", ())),
         domain_age_v2=tuple(_evidence(i, entities, T0) for i in ctx.get("domain_age", ())),
-        sources=MappingProxyType({**_SOURCES_BASE, "threat_feeds": _FEED_STATE[intel]}),
+        sources=MappingProxyType(registry_sources(intel)),
     )
     outcome, basis = sc.target(intel)
     gap = sc.gap_for(shape, intel)

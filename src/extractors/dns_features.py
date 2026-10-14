@@ -287,13 +287,24 @@ def in_learning_period(active_days: int, active_hours: int) -> bool:
     return not (active_days >= NOVELTY_MIN_ACTIVE_DAYS and active_hours >= NOVELTY_MIN_ACTIVE_HOURS)
 
 
+def device_age_gate_changes(active_days: int, active_hours: int):
+    """(replace, remove) for the novelty-gated W-04 features while the device is in its learning period
+    (in_learning_period); None outside it. Pure: the pipeline applies it through its feature assembly as a declared gate."""
+    if not in_learning_period(active_days, active_hours):
+        return None
+    return ({k: (list(v) if isinstance(v, list) else v) for k, v in _NOVELTY_GATED_DEFAULTS.items()},
+            tuple(_NOVELTY_GATED_OPTIONAL))
+
+
 def apply_device_age_gate(features: dict, active_days: int, active_hours: int) -> bool:
     """Clears the novelty-gated W-04 features while the device is in its learning period (in_learning_period).
     Returns True when it cleared them."""
-    if not in_learning_period(active_days, active_hours):
+    changes = device_age_gate_changes(active_days, active_hours)
+    if changes is None:
         return False
-    features.update({k: (list(v) if isinstance(v, list) else v) for k, v in _NOVELTY_GATED_DEFAULTS.items()})
-    for key in _NOVELTY_GATED_OPTIONAL:
+    replace, remove = changes
+    features.update(replace)
+    for key in remove:
         features.pop(key, None)
     return True
 

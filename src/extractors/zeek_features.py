@@ -642,11 +642,6 @@ class ZeekFeatureExtractor:
                 "zeek_outbound_top_dest_share": round(share, 3)}
 
     @_synchronized
-    def get_last_connection_meta(self, device_ip: str) -> dict:
-        return self._last_connection_meta.get(device_ip, {
-            "last_dest_ip": "unknown", "last_dest_port": 0, "dominant_protocol": "unknown"
-        })
-
     @_synchronized
     def pop_new_lateral_events(self, device_ip: str) -> list[tuple[str, int]]:
         events = self._new_lateral_events.get(device_ip, [])
@@ -940,13 +935,12 @@ class ZeekFeatureExtractor:
             try: self._conn_durations[src].append((ts, float(ev.get("duration"))))
             except (ValueError, TypeError): pass
         
+        # "_ts": when this connection was seen, so get_features() can pick the newest across a device's addresses. The
+        # window total of bytes (zeek_outbound_bytes) is NOT here: it lives in _outbound_bytes (U3, 2026-10-14).
         self._last_connection_meta[src] = {
             "last_dest_ip": dst_ip, "last_dest_port": dst_port,
-            "dominant_protocol": proto.upper()
+            "dominant_protocol": proto.upper(), "_ts": ts,
         }
-        # U3 (2026-10-14): no "zeek_outbound_bytes" here -- pipeline merges this dict over get_features(), where that key is
-        # the window TOTAL; the last single connection's bytes overwrote it (exfil z-score, baseline, CL-AFPE, ML, alert size).
-        # INTERIM (redo: P0 typed immutable gathered input + P1 per-connection observations; MASTER_TODO 0d register).
 
         if dst_ip:
             self._enrich_ptr(dst_ip)
@@ -1324,16 +1318,12 @@ class ZeekFeatureExtractor:
             durations.extend(d for t, d in self._conn_durations.get(ip, []))
             rejected_ips.update(ip2 for t, ip2 in self._rejected_ips.get(ip, []))
 
-        # "Last" connection metadata: most recent write wins across all known addresses.
-        # _last_connection_meta doesn't carry its own timestamp, so — same simplification
-        # as before this change — whichever known IP was processed most recently in the
-        # ingest stream provides it; we just now also check the device's other addresses
-        # instead of only the single one the caller happened to pass.
-        meta = {}
-        for ip in ips:
-            m = self._last_connection_meta.get(ip)
-            if m:
-                meta = m
+        # "Last" connection metadata: the most recent connection across ALL the device's addresses, by the time each
+        # was seen. (It used to be the last address in `ips` that had one -- and `ips` is most-recent-address first, so
+        # the OLDEST address won; the pipeline then replaced it with the single current address's meta, "unknown" when
+        # that address had none: two producers of the same three keys.)
+        meta = max((m for m in (self._last_connection_meta.get(ip) for ip in ips) if m),
+                   key=lambda m: m.get("_ts", 0.0), default={})
         port = meta.get("last_dest_port", 0)
         app_weight = 0.2 if port in (80, 443) else (0.6 if port in (22, 445, 3389) else 0.4)
 
@@ -1408,7 +1398,7 @@ class ZeekFeatureExtractor:
             "zeek_app_protocol_weight": app_weight,
             "last_dest_ip": meta.get("last_dest_ip", "unknown"),
             "last_dest_port": port,
-            "dominant_protocol": meta.get("dominant_protocol", "TCP")
+            "dominant_protocol": meta.get("dominant_protocol", "unknown")   # no connection seen: not "TCP" (a made-up protocol)
         }
 
     @_synchronized

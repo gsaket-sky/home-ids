@@ -31,7 +31,8 @@ from core.heartbeat import HEARTBEATS, read_component_heartbeats
 from core.source_availability import build_source_availability
 from core.metrics_sync import MetricsExporter
 from core.subprocess_launchers import rotate_subprocess_log_if_oversized
-from extractors.dns_features import FeatureExtractor, PiHoleCollector, apply_device_age_gate, in_learning_period
+from extractors.dns_features import FeatureExtractor, PiHoleCollector, device_age_gate_changes, in_learning_period
+from core.feature_assembly import FeatureAssembly
 from extractors.zeek_features import ZeekCollector, ZeekFeatureExtractor
 from extractors.fritzbox_capture import ReactiveCaptureDispatcher, cleanup_stale_scratch_files  # PHASE 21D
 from intelligence.hypotheses.evidence import EvidenceStore, Evidence, SAFE_DEVICE_DAMPENED_TYPES
@@ -1021,12 +1022,14 @@ class EnginePipeline:
         # one instance so the budget is genuinely shared, not per-trigger-type. See
         # ReactiveCaptureDispatcher's docstring in extractors/fritzbox_capture.py.
         self.reactive_capture = ReactiveCaptureDispatcher()
-        # Which evidence sources are available (Zeek, the DNS source, GeoIP, feeds, AbuseIPDB, VirusTotal): one cached
+        # Which evidence sources are available (Zeek, the DNS source, GeoIP, feeds, AbuseIPDB, VirusTotal, reactive capture,
+        # Suricata, RDAP, Tranco): one cached
         # snapshot per cycle, recorded on every decision and alert (core/source_availability.py, P0 capability registry).
         self.source_availability = build_source_availability(
             config=self.config, zeek_collector=self.zeek_collector, ti_engine=self.ti_engine,
             geoip_engine=self.geoip_engine, abuseipdb=self.abuseipdb, virustotal=self.virustotal,
-            heartbeats=lambda: read_component_heartbeats(state_dir), state_dir=state_dir)
+            heartbeats=lambda: read_component_heartbeats(state_dir), state_dir=state_dir,
+            reactive_capture=self.reactive_capture, rdap=lambda: self.rdap_age)
         # Seeded to "now", not 0 -- avoids firing a spot-check burst immediately on
         # every process restart; the first one fires after a full interval has
         # elapsed, same as a cron-scheduled job would behave.
@@ -1733,37 +1736,44 @@ class EnginePipeline:
                 # since it needs live state (rolling window, EWMA baselines).
                 # PHASE 6: aggregate across every known address of this device, not just the
                 # single currently-active client_ip — see known_ips_snapshot comment above.
-                _zeek_features = {**self.zeek_fx.get_features(known_ips_snapshot, device_id=dev_id), **self.zeek_fx.get_last_connection_meta(client_ip)}
+                _zeek_features = self.zeek_fx.get_features(known_ips_snapshot, device_id=dev_id)
 
                 # ─── PHASE 3: Compute localized features (re-acquire lock) ──────────────
                 mitigation_pending = None
                 _resolve_live = None
                 with self.state_manager.lock_device(dev_id) as state:
-                    features = {**self.dns_extractor.compute(state, now, window_seconds), **_zeek_features}
+                    # One owner per feature key (core/feature_assembly.py): a key two sources both produce keeps the first
+                    # source's value and is reported as a "features" engine error -- never silently replaced (U3).
+                    asm = FeatureAssembly()
+                    asm.add_source("dns", self.dns_extractor.compute(state, now, window_seconds))
+                    asm.add_source("zeek", _zeek_features)
                     # W-04: novelty-gated features say nothing about a device still in its own learning period
                     # (measured in active days and hours, not calendar time).
                     _familiarity = getattr(self, "familiarity", None)
-                    apply_device_age_gate(features, *(_familiarity.learned_activity(dev_id) if _familiarity else (0, 0)))
-                    features["sigma_shift"] = argus_live_engine.get_device_sigma_shift(dev_id)
-                    features["current_hour"] = current_hour
-                    features["current_minute"] = current_minute
+                    _gate = device_age_gate_changes(*(_familiarity.learned_activity(dev_id) if _familiarity else (0, 0)))
+                    if _gate is not None:
+                        asm.gate("learning_period", *_gate)
+                    features = asm.features      # the assembly's dict: every later write goes through asm.derive()
+                    asm.derive("context", "sigma_shift", argus_live_engine.get_device_sigma_shift(dev_id))
+                    asm.derive("context", "current_hour", current_hour)
+                    asm.derive("context", "current_minute", current_minute)
                     # AUDIT FIX #15: Inject honeypot IPs from config so scoring engine doesn't hardcode them
                     _honeypot_ips = self.config.get("honeypot_ips", [])
-                    features["_config_honeypot_ips"] = ", ".join(_honeypot_ips) if _honeypot_ips else "configured decoy IPs"
+                    asm.derive("context", "_config_honeypot_ips", ", ".join(_honeypot_ips) if _honeypot_ips else "configured decoy IPs")
 
                     def calc_z(val: float, baseline_obj) -> float:
                         mean, var, init, n = baseline_obj.get_stats_interpolated(current_hour, current_minute) if hasattr(baseline_obj, "get_stats_interpolated") else baseline_obj.get_stats(current_hour)
                         if not init or n < 10: return 0.0
                         return max(0.0, (val - mean) / math.sqrt(max(var, 1e-4)))
 
-                    features["query_rate_z"]       = calc_z(features.get("query_rate", 0.0), state.rate_baseline)
-                    features["entropy_z"]           = calc_z(features.get("entropy_avg", 0.0), state.entropy_baseline)
-                    features["entropy_avg_z"]       = features["entropy_z"]
-                    features["unique_domains_z"]    = calc_z(features.get("unique_domains", 0.0), state.unique_baseline)
-                    features["nxdomain_ratio_z"]    = calc_z(features.get("nxdomain_ratio", 0.0), state.nxdomain_baseline)
-                    features["blocked_ratio_z"]     = calc_z(features.get("blocked_ratio", 0.0), state.blocked_baseline)
-                    features["suspicious_domains_z"]= calc_z(features.get("suspicious_domains", 0.0), state.dga_baseline)
-                    features["outbound_bytes_z"]    = calc_z(features.get("zeek_outbound_bytes", 0.0), state.outbound_bytes_baseline)
+                    asm.derive("z_scores", "query_rate_z", calc_z(features.get("query_rate", 0.0), state.rate_baseline))
+                    asm.derive("z_scores", "entropy_z", calc_z(features.get("entropy_avg", 0.0), state.entropy_baseline))
+                    asm.derive("z_scores", "entropy_avg_z", features["entropy_z"])
+                    asm.derive("z_scores", "unique_domains_z", calc_z(features.get("unique_domains", 0.0), state.unique_baseline))
+                    asm.derive("z_scores", "nxdomain_ratio_z", calc_z(features.get("nxdomain_ratio", 0.0), state.nxdomain_baseline))
+                    asm.derive("z_scores", "blocked_ratio_z", calc_z(features.get("blocked_ratio", 0.0), state.blocked_baseline))
+                    asm.derive("z_scores", "suspicious_domains_z", calc_z(features.get("suspicious_domains", 0.0), state.dga_baseline))
+                    asm.derive("z_scores", "outbound_bytes_z", calc_z(features.get("zeek_outbound_bytes", 0.0), state.outbound_bytes_baseline))
 
                     # The window's most notable domain: context for the reputation lookups and ML features below.
                     # Never an alert's target -- that comes from the evidence that fired (core/alert_attribution.py).
@@ -1865,9 +1875,9 @@ class EnginePipeline:
                             _ti_matched["ips"] = [dest_ip]
                             ti_ioc_hits_total.labels(source="threat_intel", ioc_type="ip").inc()
 
-                features["ti_risk"] = ti_risk
-                features["ti_match"] = ti_match
-                features["ti_matched"] = _ti_matched
+                asm.derive("reputation", "ti_risk", ti_risk)
+                asm.derive("reputation", "ti_match", ti_match)
+                asm.derive("reputation", "ti_matched", _ti_matched)
                 # BUGFIX: the CL-AFPE Stage-2 and train_fp_classifier.py both read
                 # features["tranco_rank"] for Feature 0 of the 11-dim LightGBM vector, but
                 # nothing ever wrote it -- permanently 0 for every alert since this feature
@@ -1875,7 +1885,7 @@ class EnginePipeline:
                 # full ranked 1M-row list every 24h (only the domain half was ever kept);
                 # get_tranco_rank() now exposes the rank half too. Same top_domain used for
                 # the reputation classifier just below, for consistency.
-                features["tranco_rank"] = self.ti_engine.get_tranco_rank(top_domain) if self.ti_engine and top_domain else 0
+                asm.derive("reputation", "tranco_rank", self.ti_engine.get_tranco_rank(top_domain) if self.ti_engine and top_domain else 0)
                 # Running best-so-far for reputation_target's attribution, carried across the
                 # ti_risk/abuse_risk/vt_risk blocks (see the BUGFIX comment above ti_risk).
                 _best_risk_seen = ti_risk
@@ -1903,7 +1913,7 @@ class EnginePipeline:
                         _best_risk_seen = abuse_risk
                         reputation_target = dest_ip
 
-                features["abuseipdb_risk"] = abuse_risk
+                asm.derive("reputation", "abuseipdb_risk", abuse_risk)
 
                 # vt_risk: the honeypot signal (a honeypot target makes the external client inherently malicious)
                 # or, when the customer has switched VirusTotal on with their own key (off by default), its
@@ -1927,14 +1937,16 @@ class EnginePipeline:
                         if vt_risk > _best_risk_seen:
                             _best_risk_seen = vt_risk
                             reputation_target = vt_risk_source
-                features["vt_risk"] = vt_risk
+                asm.derive("reputation", "vt_risk", vt_risk)
                 # 2026-10-14 (0c Step 3): each source's hit / clean / not-checked state beside its risk number -- a
                 # source that is off, rate-limited, stale or failed writes risk 0.0 like a clean lookup. Stored with
                 # the alert and its training row; read by CL-AFPE's own-device suppression and the alert text.
-                features["reputation_sources"] = reputation_source_status.collect(
+                asm.derive("reputation", "reputation_sources", reputation_source_status.collect(
                     self.ti_engine, self.abuseipdb, self.virustotal, ti_match=bool(ti_match),
                     dest_ip=dest_ip if _dest_ip_is_real_host else None,
-                    domain=top_domain if top_domain and top_domain != "unknown" else None)
+                    domain=top_domain if top_domain and top_domain != "unknown" else None))
+                if asm.collisions:
+                    argus_live_engine.note_feature_collisions(asm.collisions)
 
                 # ─── PHASE 5: ML scoring + risk computation (re-acquire lock) ──────────
                 # --- Version 7 Integration ---
