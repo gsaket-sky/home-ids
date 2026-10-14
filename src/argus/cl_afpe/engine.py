@@ -423,6 +423,24 @@ class ClAfpeEngine:
         }
         self.store.update_device_metadata(device_id, {"fp_profile": profile}, timestamp=now)
 
+    # U5 (2026-10-14): a device's own profile threshold is bounded as a multiple of the default the getters use -- an
+    # automatic correction (autonomous_stage23 / autonomous_local_origin) may raise it up to 1.5x, a person up to 2x. Before,
+    # automatic corrections raised the ARP-sweep / rejected-connection / long-connection thresholds without limit (8 -> 88
+    # after ten), so those detectors went blind for the device, and the engine's own suppressions fed their own bar.
+    # INTERIM (redo: P3b; MASTER_TODO 0d register): the design (DETECTION_CORE_REWORK, P3b) replaces this bumping with one harmless-pattern memory built from
+    # what the device actually does, never from the engine's own suppressions -- redo this there.
+    PROFILE_CEILING_FACTOR = 2.0                 # a person (HUMAN_CORRECTION_SOURCES)
+    PROFILE_CEILING_FACTOR_AUTOMATIC = 1.5       # the engine's own corrections
+
+    def _apply_threshold_correction(self, device_id: str, key: str, current: float, proposed: float, default: float,
+                                    source: str, hostname: str, now: float, reason: str) -> None:
+        factor = (self.PROFILE_CEILING_FACTOR if source in HUMAN_CORRECTION_SOURCES
+                  else self.PROFILE_CEILING_FACTOR_AUTOMATIC)
+        # never lowers: a value already above the ceiling (set by the old uncapped code) stays where it is
+        value = max(current, min(proposed, default * factor))
+        self.apply_device_fp_profile(device_id, key, value, baseline=current, set_by=source, hostname=hostname,
+                                     sample_count=1, now=now, reason=reason)
+
     def _get_device_profile_value(self, device_id: str, key: str, default: float) -> float:
         entry = self.store.get_device_metadata(device_id).get("fp_profile", {}).get(key)
         if not entry:
@@ -539,10 +557,9 @@ class ClAfpeEngine:
             bumped_any = False
             current_unique_ip = self.get_device_conn_abuse_unique_ip_threshold(device_id)
             if s0_rej > 25 and s0_rej_unique > current_unique_ip:
-                self.apply_device_fp_profile(
-                    device_id, "conn_abuse_unique_ip_threshold", current_unique_ip + 4.0,
-                    baseline=current_unique_ip, set_by=source, hostname=hostname,
-                    sample_count=1, now=now,
+                self._apply_threshold_correction(
+                    device_id, "conn_abuse_unique_ip_threshold", current_unique_ip, current_unique_ip + 4.0, 5.0,
+                    source, hostname, now,
                     reason=f"Corrected {signature_base} alert for {hostname or device_id} "
                            f"(zeek_conn_abuse/s0_rej evidence) -- raising this device's own "
                            f"rejected-connection unique-IP threshold instead of the global default.",
@@ -550,10 +567,9 @@ class ClAfpeEngine:
                 bumped_any = True
             current_long_conn = self.get_device_long_conn_duration_threshold(device_id)
             if max_dur > current_long_conn:
-                self.apply_device_fp_profile(
-                    device_id, "long_conn_duration_threshold", current_long_conn * 1.5,
-                    baseline=current_long_conn, set_by=source, hostname=hostname,
-                    sample_count=1, now=now,
+                self._apply_threshold_correction(
+                    device_id, "long_conn_duration_threshold", current_long_conn, current_long_conn * 1.5, 14400.0,
+                    source, hostname, now,
                     reason=f"Corrected {signature_base} alert for {hostname or device_id} "
                            f"(zeek_long_conn evidence) -- raising this device's own "
                            f"long-connection duration threshold.",
@@ -561,10 +577,9 @@ class ClAfpeEngine:
                 bumped_any = True
             if arp_count > 0:
                 current_arp = self.get_device_arp_sweep_threshold(device_id)
-                self.apply_device_fp_profile(
-                    device_id, "arp_sweep_unique_targets_threshold", current_arp + 4.0,
-                    baseline=current_arp, set_by=source, hostname=hostname,
-                    sample_count=1, now=now,
+                self._apply_threshold_correction(
+                    device_id, "arp_sweep_unique_targets_threshold", current_arp, current_arp + 4.0, 8.0,
+                    source, hostname, now,
                     reason=f"Corrected {signature_base} alert for {hostname or device_id} "
                            f"(arp_sweep evidence) -- raising this device's own ARP-sweep "
                            f"threshold instead of the global default.",
@@ -575,10 +590,9 @@ class ClAfpeEngine:
                 # feature snapshot -- fall back to the old blanket behavior rather
                 # than silently doing nothing.
                 current_arp = self.get_device_arp_sweep_threshold(device_id)
-                self.apply_device_fp_profile(
-                    device_id, "arp_sweep_unique_targets_threshold", current_arp + 4.0,
-                    baseline=current_arp, set_by=source, hostname=hostname,
-                    sample_count=1, now=now,
+                self._apply_threshold_correction(
+                    device_id, "arp_sweep_unique_targets_threshold", current_arp, current_arp + 4.0, 8.0,
+                    source, hostname, now,
                     reason=f"Corrected {signature_base} alert for {hostname or device_id} -- "
                            f"no evidence-specific features available on this alert, falling "
                            f"back to the ARP-sweep threshold.",
@@ -1134,11 +1148,13 @@ class ClAfpeEngine:
         # --- Stage 3: FastEmbed (skipped for a placeholder domain, Phase 10 fix) ---
         has_real_domain = bool(domain) and domain.strip().lower() not in ("unknown", "null", "none", "")
         embed_sim, embed_match = None, "N/A (no resolved hostname/domain — raw IP connection)"
+        embed_is_static_rule = False
         if has_real_domain:
             if self.ml_scorer:
                 embed_sim, embed_match = self.ml_scorer.score_stage3(domain)
             if embed_sim is None:
                 embed_sim, embed_match = stage3_rule_fallback(domain)
+                embed_is_static_rule = True
         embed_sim_str = f"{embed_sim:.3f}" if embed_sim is not None else "N/A"
 
         # --- Final verdict ---
@@ -1153,7 +1169,18 @@ class ClAfpeEngine:
         else:
             stage_hit = None
 
-        if combined >= effective_suppress_threshold:
+        # U6 (2026-10-14): two things Stage 2/3 never does. The static rule fallback (no embedding model loaded: the
+        # fresh-install default) may rank but never suppress or immunize -- a name pattern is not evidence. And a decision
+        # backed by >= 2 independent evidence families is never suppressed here (rule G3, first step).
+        # INTERIM (redo: P3b -- rule G3 in full, calibrated on labelled outcomes; MASTER_TODO 0d register).
+        suppression_barred = ""
+        if embed_is_static_rule:
+            suppression_barred = "static rule fallback (no embedding model loaded) may rank an alert, never suppress it"
+        elif int((decision or {}).get("independent_sources", 0) or 0) >= 2:
+            suppression_barred = ("the decision rests on >= 2 independent evidence families; "
+                                  "Stage 2/3 scores never suppress that")
+
+        if combined >= effective_suppress_threshold and not suppression_barred:
             # GAP 1 FIX (2026-09-15): decision/asn_owner now threaded through so
             # mark_false_positive()'s own corroboration-recording (moved there, see
             # its 2026-09-15 comment) has the freshest evidence_types/
@@ -1196,7 +1223,9 @@ class ClAfpeEngine:
                 "reasons": [
                     f"LightGBM FP_MODEL_SCORE={lgbm_prob:.3f} (uncalibrated classifier output)",
                     f"FastEmbed similarity (contextual evidence, not a verdict)={embed_sim_str} for domain '{domain}' → closest known pattern: '{embed_match or 'N/A'}'",
-                    f"Combined confidence={combined:.3f} insufficient to suppress (threshold={effective_suppress_threshold})",
+                    f"Combined confidence={combined:.3f} insufficient to suppress (threshold={effective_suppress_threshold})"
+                    if not suppression_barred else
+                    f"Combined confidence={combined:.3f} not used to suppress: {suppression_barred}",
                 ],
                 "suppress": False,
             }

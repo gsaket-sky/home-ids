@@ -189,6 +189,11 @@ class ZeekCollector:
         self._reader_stop = threading.Event()
         self._init_tailers()
 
+    def is_available(self) -> bool:
+        """True while the Zeek log directory is readable and its tailers are set up (the source-availability registry,
+        core/source_availability.py, reads this)."""
+        return bool(self._available)
+
     def start(self) -> None:
         """Start the background reader. File reading + JSON parsing then happens on
         this thread, continuously (events land within ~READER_INTERVAL_SECONDS of Zeek
@@ -360,6 +365,21 @@ class ZeekFeatureExtractor:
     _JA3_COMMON_STACK_MIN_SERVERS = 5
     _SUSPICIOUS_PORTS = frozenset([4444, 4445, 8888, 9999, 1337, 31337, 6667, 6697, 1080, 3128, 5353])
     _EXCLUDED_HONEYPOT_PORTS = frozenset([137, 138, 139, 1900, 5353])
+    # Discovery and housekeeping a router / NAS / TV does toward addresses nobody uses (owner decision 2026-10-14):
+    # these never count as "contact" with a decoy. ICMP (DHCP address checks, device-list scans) is excluded whole --
+    # for ICMP the Zeek "port" is the message type, not a service. The UDP set: DHCP 67/68, WS-Discovery 3702,
+    # LLMNR 5355. Protocol facts only, no addresses; a TCP connect or any other UDP port still counts.
+    # INTERIM (redo: P1 observations -- judge contact by session, not port; MASTER_TODO 0d interim-fix register).
+    _HONEYPOT_DISCOVERY_UDP_PORTS = frozenset([67, 68, 3702, 5355])
+
+    @classmethod
+    def _is_honeypot_discovery(cls, proto: str, dst_port: int) -> bool:
+        proto = str(proto or "").lower()
+        if proto.startswith("icmp"):
+            return True
+        if dst_port in cls._EXCLUDED_HONEYPOT_PORTS:
+            return True
+        return proto == "udp" and dst_port in cls._HONEYPOT_DISCOVERY_UDP_PORTS
     
     def __init__(self, home_subnets: list = None, ti_engine=None, geoip_engine=None, safe_ips: set = None, honeypot_ips: set = None, safe_patterns: set = None, wired_probe_ips: set = None, lateral_ports: set = None, wired_probe_ignore_sources: set = None,
                  wired_probe_ignore_services=None, wired_probe_warmup_seconds: float = 0.0):
@@ -624,7 +644,7 @@ class ZeekFeatureExtractor:
     @_synchronized
     def get_last_connection_meta(self, device_ip: str) -> dict:
         return self._last_connection_meta.get(device_ip, {
-            "last_dest_ip": "unknown", "last_dest_port": 0, "dominant_protocol": "unknown", "zeek_outbound_bytes": 0
+            "last_dest_ip": "unknown", "last_dest_port": 0, "dominant_protocol": "unknown"
         })
 
     @_synchronized
@@ -922,12 +942,15 @@ class ZeekFeatureExtractor:
         
         self._last_connection_meta[src] = {
             "last_dest_ip": dst_ip, "last_dest_port": dst_port,
-            "dominant_protocol": proto.upper(), "zeek_outbound_bytes": orig_bytes
+            "dominant_protocol": proto.upper()
         }
+        # U3 (2026-10-14): no "zeek_outbound_bytes" here -- pipeline merges this dict over get_features(), where that key is
+        # the window TOTAL; the last single connection's bytes overwrote it (exfil z-score, baseline, CL-AFPE, ML, alert size).
+        # INTERIM (redo: P0 typed immutable gathered input + P1 per-connection observations; MASTER_TODO 0d register).
 
         if dst_ip:
             self._enrich_ptr(dst_ip)
-            if dst_ip in self.honeypot_ips and dst_port not in self._EXCLUDED_HONEYPOT_PORTS:
+            if dst_ip in self.honeypot_ips and not self._is_honeypot_discovery(proto, dst_port):
                 LOGGER.warning("Honeypot hit! Src: %s, Dst: %s:%d", src, dst_ip, dst_port)
                 self._honeypot_hits[src].append((ts, dst_ip))
                 

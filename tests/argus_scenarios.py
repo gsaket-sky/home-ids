@@ -60,8 +60,8 @@ class HypothesisEngine(_hyp.HypothesisEngine):
     def __init__(self):
         super().__init__()
         # the same hypotheses, as the wrapped classes this module exports (so isinstance checks hold)
-        self.attack_hypotheses = [globals()[type(h).__name__]() for h in self.attack_hypotheses]
-        self.benign_hypotheses = [globals()[type(h).__name__]() for h in self.benign_hypotheses]
+        self._attack_classes = tuple(globals()[cls.__name__] for cls in self._attack_classes)
+        self._benign_classes = tuple(globals()[cls.__name__] for cls in self._benign_classes)
 
     def evaluate_all(self, evidence, rep_vector, device_type="", baseline_familiarity=0.0, *args, **kwargs):
         return super().evaluate_all(_to_v2(evidence), rep_vector, device_type, baseline_familiarity, *args, **kwargs)

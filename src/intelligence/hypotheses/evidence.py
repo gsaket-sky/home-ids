@@ -4,6 +4,7 @@ from typing import Dict, List, Optional, Tuple
 import time
 
 from utils import ZEEK_NOTICE_ATTACK_SHAPED_EVIDENCE_TYPES
+from argus.hypotheses.independence import family_for
 
 @dataclass
 class Evidence:
@@ -15,7 +16,6 @@ class Evidence:
     baseline: Optional[float] = None
     confidence: float = 1.0 # detector confidence 0.0-1.0
     freshness: float = 1.0  # multiplier that can decay over time
-    independence_group: str = "general" # e.g., "dns_behavior", "reputation" -- see EVIDENCE_FAMILIES below
     provenance: str = ""    # e.g., "detector:dns_entropy"
     domain: Optional[str] = None
     # Scan-shaped evidence (arp_sweep, zeek_conn_abuse, zeek_lateral_scan) touches a SET of hosts: `domain` holds one
@@ -27,55 +27,35 @@ class Evidence:
     def effective_weight(self) -> float:
         return self.confidence * self.freshness
 
+    @property
+    def family(self) -> str:
+        """The evidence family -- from the one registry (argus/hypotheses/independence.py), never from the detector
+        that produced the item (W-13, 2026-10-14: the free-form `independence_group` string is gone)."""
+        return family_for(self.type)
 
-# VERSION 10 (evidence families): canonical registry of every `independence_group`
-# value actually used anywhere in the codebase. Before this existed, independence_group
-# was just an ad-hoc string literal scattered across each detector file with no central
-# list -- argus/decision/engine.py's "how many independent evidence sources" count read a
-# hand-maintained hybrid type-prefix-or-group-membership filter that had silently never
-# been updated when threat_signals.py added "lan_recon" (arp_sweep) evidence, so a real
-# ARP-sweep + corroborating signal never counted toward the 2-independent-sources bar a
-# HIGH-severity verdict requires. This registry is the single source of truth
-# argus/decision/engine.py's filter now reads from, so a new detector inventing a fragmenting
-# or colliding group name is at least visible in one place instead of silently
-# fragmenting corroboration counting further.
+
+# W-13 (2026-10-14): the evidence-family model has ONE registry, argus/hypotheses/independence.py's
+# INDEPENDENCE_FAMILY_MAP (evidence type -> family; NON_ATTACK_FAMILIES = the context-only families that never count
+# toward an attack verdict). This module used to keep a second, coarser vocabulary (EVIDENCE_FAMILIES, set by each
+# detector as a free-form `independence_group` string); it drove the evidence expiry, the safe-device noise filter and
+# the family names saved on alerts while the decision engine counted by the other model. Both are re-stated on types
+# and registry families below.
 #
-# This is a DIFFERENT, coarser question than the per-hypothesis `subtag` value some
-# detectors also encode into `provenance` (see threat_signals.py's `add()` helper) --
-# e.g. multiple dns_tunnel_v2 evidence items share independence_group="dns_tunnel_v2"
-# but differ by subtag ("encoded_labels" vs "txt_null_abuse" vs "subdomain_fanout"),
-# deliberately, so ONE hypothesis (DNSTunnelingV2Hypothesis) can still tell two
-# different tunneling signal *categories* apart for its own internal "2+ corroborating
-# categories" bonus. independence_group answers "how many independent evidence FAMILIES
-# does this device have, across every hypothesis" (argus/decision/engine.py's cross-hypothesis
-# question); subtag answers "how many distinct signal categories does THIS ONE
-# hypothesis have" (a single Hypothesis subclass's own, finer-grained question). These
-# are intentionally separate mechanisms at different granularities -- merging them would
-# lose the within-hypothesis distinction subtag exists specifically to preserve.
-EVIDENCE_FAMILIES = frozenset({
-    "dns_behavior",     # dns_rate, dns_entropy, dns_unique_ratio, dns_dga_burst
-    "dns_tunnel_v2",    # encoded labels, subdomain fanout, txt/null abuse, suspicious TLD
-    "zeek_network",     # malicious_ja3/ja4, zeek_notice, lateral_scan, exfiltration, beaconing, conn_abuse, long_conn
-    "lan_recon",        # arp_sweep (host-discovery sweep)
-    "blindspot_audit",  # dns_evasion_anomaly (reactive-capture blind-spot audit)
-    "honeypot",         # honeypot_access
-    "ml_anomaly",       # ml_anomaly
-    "local_context",    # local_device_discovery -- benign-context only, see below
-    "reputation",       # reputation
-    "suricata",         # suricata_signature_match (suricata_scan.py, VERSION 11) --
-                         # real signature/rule matches from a batch-mode Suricata scan
-                         # of a reactive-capture burst pcap. Genuinely independent of
-                         # every other family here: it's the only detector that does
-                         # byte-pattern/exploit-signature matching rather than
-                         # flow/behavioral analysis.
-})
+# Evidence types the behavioural noise filter drops for a safe-listed device (operator-verified address): the device's
+# own routine behaviour -- resolver traffic, mesh/repeater and router ARP/flow noise, ML score -- is not evidence of
+# compromise there, while threat-intel, honeypot, ARP-spoof, geofence and signature evidence is always kept. Exactly what
+# the old group assignments dropped (zeek_network, lan_recon, the named dns types, ml_anomaly); pinned by
+# tests/test_evidence_single_family_registry.py.
+SAFE_DEVICE_DAMPENED_TYPES = frozenset({
+    "ml_anomaly", "dns_rate", "dns_entropy", "dns_unique_ratio", "dns_evasion_anomaly",
+    "malicious_ja3", "malicious_ja4",
+    "zeek_lateral_scan", "zeek_exfiltration", "zeek_beaconing", "zeek_conn_abuse", "zeek_long_conn",
+    "arp_spoof_pending", "arp_sweep",
+}) | frozenset(f"zeek_notice_{tier}" for tier in ("weak", "medium", "strong", "highly_deterministic"))
 
-# Families whose evidence can corroborate an ATTACK hypothesis toward argus/decision/engine.py's
-# "N independent evidence sources" count. Deliberately excludes "local_context" -- that
-# family is benign-context-only (e.g. UPnP/SSDP local device discovery) and must never
-# count toward independent sources for an attack verdict, the same way it's already
-# excluded from pipeline.py's attack-side noisy_types dampening.
-ATTACK_EVIDENCE_FAMILIES = EVIDENCE_FAMILIES - {"local_context"}
+# Families whose evidence outlives the 10-minute behavioural default (a reputation verdict is a property of the
+# destination, not of this minute's traffic).
+LONG_LIVED_FAMILIES = frozenset({"reputation"})
 
 # PHASE 58 (hoisted from argus/hypotheses/engine.py's DeviceProfileBenignHypothesis, which
 # originally defined this as a private class attribute): Evidence `type` values that are
@@ -92,7 +72,7 @@ ATTACK_EVIDENCE_FAMILIES = EVIDENCE_FAMILIES - {"local_context"}
 # report justified suppressing NETWORK_INTRUSION using DNS-hygiene language -- query rate,
 # unique domains, entropy -- none of which NetworkIntrusionHypothesis.evaluate() actually
 # reads; see argus/hypotheses/engine.py:104-120). Deliberately excludes dns_rate/dns_entropy/
-# dns_unique_ratio (and by extension the "dns_behavior" independence_group as a whole) --
+# dns_unique_ratio (and by extension the "dns_behavior" family as a whole) --
 # those genuinely are ambiguous signals a device-profile hypothesis is allowed to explain
 # as routine telemetry, not attack-specific on their own -- see
 # DeviceProfileBenignHypothesis's own docstring.
@@ -127,7 +107,7 @@ class EvidenceStore:
             for e in self._evidence_by_device.get(device, []):
                 age = now - e.timestamp
                 ttl = 600 # 10 minutes default for behavioral
-                if e.independence_group == "reputation":
+                if e.family in LONG_LIVED_FAMILIES:
                     ttl = 86400 # 24 hours
                 if age < ttl:
                     # decay freshness linearly

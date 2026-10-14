@@ -73,7 +73,7 @@ def fresh_store(evidence_list, device="dev"):
 rep_trusted = ReputationVector(domain="device-metrics-us.amazon.com", tier=2, asn_owner="Amazon.com, Inc.")
 tv_evidence = fresh_store([
     Evidence(type="dns_rate", source="pihole", timestamp=time.time(), device="dev", value=35.0,
-             confidence=0.8, independence_group="dns_behavior"),
+             confidence=0.8),
 ])
 decision_tv = de.evaluate(tv_evidence, rep_trusted, device_type="smart_tv")
 check("a smart TV's routine high-volume DNS traffic to a known-infrastructure (tier 2) "
@@ -94,7 +94,7 @@ check("REGRESSION GUARD: the SAME evidence on a laptop (not an expected-high-vol
 rep_unclassified = rc.classify("some-iot-vendor-api.example", vt_score=0.0, ti_score=0.0, abuse_score=0.0, asn_owner="Unknown")
 familiar_evidence = fresh_store([
     Evidence(type="dns_rate", source="pihole", timestamp=time.time(), device="dev", value=25.0,
-             confidence=0.8, independence_group="dns_behavior"),
+             confidence=0.8),
 ])
 decision_no_familiarity = de.evaluate(familiar_evidence, rep_unclassified, device_type="iot", baseline_familiarity=0.0)
 check("an unclassified (tier 3) destination with ZERO learned familiarity does NOT "
@@ -244,9 +244,9 @@ check("END-TO-END: policy_bypass evidence -> DNSEvasionHypothesis.name == DNS_PO
 # ═══════════════════════════════════════════════════════════════════════════════════
 lateral_evidence = fresh_store([
     Evidence(type="zeek_lateral_scan", source="zeek", timestamp=time.time(), device="dev_scan",
-             value=5.0, confidence=0.9, independence_group="zeek_network"),
+             value=5.0, confidence=0.9),
     Evidence(type="arp_sweep", source="threat_signals", timestamp=time.time(), device="dev_scan",
-             value=12.0, confidence=0.7, independence_group="lan_recon"),
+             value=12.0, confidence=0.7),
 ], "dev_scan")
 rep_neutral_scan = ReputationVector(domain="", tier=3)
 decision_scan = de.evaluate(lateral_evidence, rep_neutral_scan)
@@ -256,7 +256,7 @@ check("a genuine multi-target lateral scan CORROBORATED by an ARP host-discovery
 
 single_source_scan = fresh_store([
     Evidence(type="zeek_lateral_scan", source="zeek", timestamp=time.time(), device="dev_scan2",
-             value=5.0, confidence=0.9, independence_group="zeek_network"),
+             value=5.0, confidence=0.9),
 ], "dev_scan2")
 decision_single_scan = de.evaluate(single_source_scan, rep_neutral_scan)
 check("REGRESSION GUARD: the SAME lateral-scan evidence with only ONE independent "
@@ -293,7 +293,7 @@ check("REGRESSION GUARD: a low-severity Suricata match is real evidence (SUSPICI
 # Section I: Attack -- other hard-stop conditions
 # ═══════════════════════════════════════════════════════════════════════════════════
 honeypot_ev = fresh_store([Evidence(type="honeypot_access", source="zeek", timestamp=time.time(),
-                                     device="dev_hp", value=1.0, confidence=1.0, independence_group="honeypot")], "dev_hp")
+                                     device="dev_hp", value=1.0, confidence=1.0)], "dev_hp")
 # PHASE 64 (Gap 3 honeypot flip, live): the live hard-stop now gates on FRESH evidence
 # (features["zeek_honeypot_hits"] > 0, the same raw signal pipeline.py itself gates
 # evidence-creation on) rather than bare Evidence presence in ev_store -- features=
@@ -318,7 +318,7 @@ check("REGRESSION GUARD: a caller that doesn't pass features= at all (no live si
       decision_no_features["state"] != "CRITICAL", f"got {decision_no_features}")
 
 arp_ev = fresh_store([Evidence(type="arp_spoofing", source="zeek", timestamp=time.time(),
-                                device="dev_arp", value=10.0, confidence=1.0, independence_group="zeek_network")], "dev_arp")
+                                device="dev_arp", value=10.0, confidence=1.0)], "dev_arp")
 check("verified ARP spoofing (real MAC-flip evidence) is a CRITICAL hard-stop",
       de.evaluate(arp_ev, ReputationVector(domain="", tier=3))["state"] == "CRITICAL")
 
@@ -345,7 +345,7 @@ geofence_corroborated_ev = fresh_store([
     # ConnectionAbuseHypothesis's own INTERNAL_RECONNAISSANCE naming, G7) -- genuine
     # behavioral corroboration, not the geofence hit corroborating itself.
     Evidence(type="arp_sweep", source="zeek", timestamp=time.time(), device="dev_geo2",
-             value=12.0, confidence=0.9, independence_group="lan_recon"),
+             value=12.0, confidence=0.9),
 ], "dev_geo2")
 check("a geofencing policy violation WITH real independent behavioral corroboration IS "
       "still a CRITICAL hard-stop -- this is what G6 is supposed to still catch",
@@ -379,7 +379,7 @@ check("GOLDEN CASE: a weak AbuseIPDB-only signal (3.78, below the 4.0 confirmed 
 # ═══════════════════════════════════════════════════════════════════════════════════
 single_dga_only = fresh_store([
     Evidence(type="dns_dga_burst", source="threat_signals", timestamp=time.time(), device="dev_solo",
-             value=20.0, confidence=0.9, independence_group="dns_behavior"),
+             value=20.0, confidence=0.9),
 ], "dev_solo")
 decision_solo = de.evaluate(single_dga_only, ReputationVector(domain="", tier=3))
 check("a strong single-source DGA signal (no corroborating family) stays SUSPICIOUS, "
@@ -388,9 +388,9 @@ check("a strong single-source DGA signal (no corroborating family) stays SUSPICI
 
 corroborated_dga = fresh_store([
     Evidence(type="dns_dga_burst", source="threat_signals", timestamp=time.time(), device="dev_corrob",
-             value=20.0, confidence=0.9, independence_group="dns_behavior"),
+             value=20.0, confidence=0.9),
     Evidence(type="reputation", source="threat_intel", timestamp=time.time(), device="dev_corrob",
-             value=1.5, confidence=0.8, independence_group="reputation"),
+             value=1.5, confidence=0.8),
 ], "dev_corrob")
 decision_corroborated = de.evaluate(corroborated_dga, ReputationVector(domain="", tier=4))
 check("the SAME DGA signal, corroborated by an independent reputation-family hit, "
@@ -405,9 +405,9 @@ check("the SAME DGA signal, corroborated by an independent reputation-family hit
 # DIFFERENT destination elsewhere in the device's window does not.
 dga_same_domain = fresh_store([
     Evidence(type="dns_dga_burst", source="threat_signals", timestamp=time.time(), device="dev_same",
-             value=20.0, confidence=0.9, independence_group="dns_behavior", domain="xkq93jf.example.com"),
+             value=20.0, confidence=0.9, domain="xkq93jf.example.com"),
     Evidence(type="reputation", source="threat_intel", timestamp=time.time(), device="dev_same",
-             value=1.5, confidence=0.8, independence_group="reputation", domain="xkq93jf.example.com"),
+             value=1.5, confidence=0.8, domain="xkq93jf.example.com"),
 ], "dev_same")
 decision_same_domain = de.evaluate(dga_same_domain, ReputationVector(domain="", tier=4))
 check("a reputation hit genuinely about the SAME domain as the DGA finding still "
@@ -416,9 +416,9 @@ check("a reputation hit genuinely about the SAME domain as the DGA finding still
 
 dga_diff_domain = fresh_store([
     Evidence(type="dns_dga_burst", source="threat_signals", timestamp=time.time(), device="dev_diff",
-             value=20.0, confidence=0.9, independence_group="dns_behavior", domain="xkq93jf.example.com"),
+             value=20.0, confidence=0.9, domain="xkq93jf.example.com"),
     Evidence(type="reputation", source="threat_intel", timestamp=time.time(), device="dev_diff",
-             value=1.5, confidence=0.8, independence_group="reputation", domain="totally-unrelated-cdn.example.net"),
+             value=1.5, confidence=0.8, domain="totally-unrelated-cdn.example.net"),
 ], "dev_diff")
 decision_diff_domain = de.evaluate(dga_diff_domain, ReputationVector(domain="", tier=4))
 check("THE FIX: a reputation hit AFFIRMATIVELY about a DIFFERENT domain than the DGA "

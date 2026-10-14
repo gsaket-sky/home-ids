@@ -31,7 +31,7 @@ from argus.evidence.model import NO_DESTINATION  # noqa: E402
 
 # --- basic field mapping ---
 v1 = V1Evidence(type="dns_tunnel_v2", source="dns_features", timestamp=123.0, device="dev1",
-                  value=4.5, confidence=0.85, independence_group="dns_behavior",
+                  value=4.5, confidence=0.85,
                   provenance="detector:dns_tunnel_v2", domain="evil.example.com")
 v2 = convert(v1, independence_family="dns_behavior_family")
 check("device_id maps from v1.device", v2.device_id == "dev1")
@@ -40,10 +40,11 @@ check("destination_id maps from v1.domain when present", v2.destination_id == "e
 check("confidence/value/timestamp/source map straight through",
       v2.confidence == 0.85 and v2.value == 4.5 and v2.timestamp == 123.0 and v2.source == "dns_features")
 
-# --- independence_family comes from the caller, NEVER from v1's own independence_group ---
-check("independence_family comes from the explicit caller arg, not v1.independence_group "
-      "(the specific Phase 64 conflation this adapter exists to avoid)",
-      v2.independence_family == "dns_behavior_family" and v2.independence_family != v1.independence_group)
+# --- independence_family comes from the caller, NEVER from the detector Evidence itself ---
+# (W-13, 2026-10-14: the detector Evidence's free-form independence_group field is gone; its .family is the registry's.
+# The adapter still takes the family only from its caller -- the Phase 64 conflation it exists to avoid.)
+check("independence_family comes from the explicit caller arg, not from the detector Evidence's own family",
+      v2.independence_family == "dns_behavior_family" and v2.independence_family != v1.family)
 
 # --- NO_DESTINATION fallback: the honest-scope case (zeek_exfiltration/zeek_beaconing-shaped) ---
 v1_no_domain = V1Evidence(type="zeek_exfiltration", source="zeek_features", timestamp=200.0,

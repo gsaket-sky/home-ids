@@ -276,12 +276,14 @@ class BaselineEngine:
     def is_learning_paused(self, device_id: str, now: Optional[float] = None) -> bool:
         """Design Invariant 06: no baseline/regime/Markov update while a
         device sits at SUSPICIOUS/HIGH/CRITICAL, and not immediately on
-        return to BENIGN either. `compute_decision()` only persists a new
-        decisions row when the verdict CHANGES (argus/ingest/sources.py's
-        only_persist_if_changed_from) -- so the latest row's own timestamp
-        already IS "when this device most recently left/avoided an incident
-        state," and a plain elapsed-time check against it is the correct
-        cooldown, with no extra row-counting needed.
+        return to a non-incident state either: the cooldown runs from when the
+        device's most recent incident ENDED (graph store get_incident_status()).
+        A row's timestamp alone is not that: rows are written on a verdict
+        change, but also for a device's first decision and for its first cycle
+        after every service restart, so "the newest row" paused a device that
+        never had an incident -- for 30 minutes after it first appeared and
+        again after every restart of the engine, all devices at once (fixed
+        2026-10-14).
 
         BUGFIX (2026-09-20, identity-merge handover follow-up): resolves
         device_id to its live canonical id first -- get_latest_decision_for_device()
@@ -299,13 +301,13 @@ class BaselineEngine:
         if cached is not None and cached[1] > now and cached[2] == version:
             return cached[0]
         canonical = self.store.resolve_canonical_device_id(device_id)
-        latest = self.store.get_latest_decision_state(canonical)
-        if latest is None:
-            paused = False
-        elif latest.get("state") in _INCIDENT_STATES:
+        status = self.store.get_incident_status(canonical, _INCIDENT_STATES)
+        if status["in_incident"]:
             paused = True
+        elif status["incident_ended_at"] is None:
+            paused = False       # never had an incident (a first-decision or restart row is not the end of one)
         else:
-            paused = (now - float(latest.get("timestamp", 0) or 0)) < _INCIDENT_COOLDOWN_SECONDS
+            paused = (now - float(status["incident_ended_at"])) < _INCIDENT_COOLDOWN_SECONDS
         if len(self._pause_cache) > 20000:
             self._pause_cache.clear()
         self._pause_cache[device_id] = (paused, now + _PAUSE_CACHE_SECONDS, version)

@@ -74,9 +74,9 @@ check("A: honeypot hard-stop fires through the adapter exactly like calling v13'
 
 two_family_ev = [
     V1Evidence(type="malicious_ja3", source="zeek", timestamp=now, device="d1", value=1.0,
-                confidence=0.9, independence_group="zeek_network", domain="evil.example.com"),
+                confidence=0.9, domain="evil.example.com"),
     V1Evidence(type="zeek_notice_medium", source="zeek", timestamp=now, device="d1", value=1.0,
-                confidence=0.75, independence_group="zeek_network", domain="evil.example.com"),
+                confidence=0.75, domain="evil.example.com"),
 ]
 r_v13 = live_engine.evaluate(list(two_family_ev), ReputationVector(domain="evil.example.com", tier=3))
 check("B: two Zeek-derived signals count as ONE independent source, so this stays SUSPICIOUS, not HIGH",
@@ -86,7 +86,7 @@ check("B: two Zeek-derived signals count as ONE independent source, so this stay
 # --- C. zeek_exfiltration/zeek_beaconing fallback_context split ---
 
 exfil_ev = [V1Evidence(type="zeek_exfiltration", source="zeek", timestamp=now, device="d2",
-                         value=5.0, confidence=0.8, independence_group="zeek_network", domain=None)]
+                         value=5.0, confidence=0.8, domain=None)]
 r_no_features = live_engine.evaluate(exfil_ev, ReputationVector(domain="", tier=3), features={})
 check("C: zeek_exfiltration with no features at all doesn't crash -- falls back to NO_DESTINATION",
       "state" in r_no_features)
@@ -103,7 +103,7 @@ check("C (P0): destination-less zeek_exfiltration keeps NO_DESTINATION -- never 
       len(_converted) == 1 and _converted[0].destination_id == _NO_DEST, str([e.destination_id for e in _converted]))
 _two = live_engine._convert_active_evidence(
     exfil_ev + [V1Evidence(type="zeek_beaconing", source="zeek", timestamp=now, device="d2", value=1.0,
-                           confidence=0.7, independence_group="zeek_network", domain="c2.example")],
+                           confidence=0.7, domain="c2.example")],
     {"last_dest_ip": "203.0.113.50"})
 check("C (P0): evidence in the same batch keeps its own destination; nothing is attributed to last_dest_ip",
       sorted(e.destination_id for e in _two) == sorted([_NO_DEST, "c2.example"]), str([e.destination_id for e in _two]))
@@ -116,7 +116,7 @@ check("C: ZeekFeatureExtractor's own 'unknown' sentinel is correctly treated as 
       "state" in r_sentinel)
 
 no_gap_ev = [V1Evidence(type="zeek_notice_medium", source="zeek", timestamp=now, device="d3",
-                          value=1.0, confidence=0.9, independence_group="zeek_network", domain=None)]
+                          value=1.0, confidence=0.9, domain=None)]
 r_no_gap = live_engine.evaluate(no_gap_ev, ReputationVector(domain="", tier=3),
                                   features={"last_dest_ip": "203.0.113.60"})
 check("C: a type with NO destination gap (zeek_notice_medium) never gets the fallback_context "
@@ -134,7 +134,7 @@ from argus.evidence.ingest import convert as _v2_convert  # noqa: E402
 
 exfil_ev_with_real_domain = V1Evidence(
     type="zeek_exfiltration", source="zeek", timestamp=now, device="d2",
-    value=5.0, confidence=0.8, independence_group="zeek_network", domain="93.184.216.34",
+    value=5.0, confidence=0.8, domain="93.184.216.34",
 )
 converted = _v2_convert(exfil_ev_with_real_domain, "data_transfer_pattern",
                           fallback_context={"dest_ip": "104.16.132.229"})
@@ -180,7 +180,7 @@ live_engine.configure(_graph_db_path)
 
 _t0 = 2_000_000.0
 lateral_scan_ev = [V1Evidence(type="zeek_lateral_scan", source="zeek", timestamp=_t0, device="devA",
-                                 value=1.0, confidence=0.9, independence_group="zeek_network")]
+                                 value=1.0, confidence=0.9)]
 r1 = live_engine.evaluate(lateral_scan_ev, ReputationVector(domain="", tier=3), features={},
                              device_id="devA", now=_t0)
 check("E: cycle 1 alone (one family, zeek_lateral_scan) stays SUSPICIOUS, not HIGH -- "
@@ -199,7 +199,7 @@ check("E: cycle 1's decision was actually written to the graph",
 # already-handled evidence). Cycle 1's lateral_scan evidence is NOT included here --
 # the only way this reaches HIGH is if evaluate() pulls it back in from the graph.
 ja3_ev = [V1Evidence(type="dns_dga_burst", source="pihole", timestamp=_t0 + 60, device="devA",
-                       value=1.0, confidence=0.9, independence_group="dns_behavior")]
+                       value=1.0, confidence=0.9)]
 r2 = live_engine.evaluate(ja3_ev, ReputationVector(domain="", tier=3), features={},
                              device_id="devA", now=_t0 + 60)
 check("E: cycle 2's OWN fresh evidence alone (just malicious_ja3) would also only be one "
@@ -282,8 +282,7 @@ check("E: dedup -- a CHANGED verdict (BENIGN -> CRITICAL hard-stop) writes a new
 # in EvidenceStore (confirmed live: 12,766 rows / 28.7MB after 9 minutes of real runtime).
 _t_repeat = _t0 + 600
 _repeating_v1_ev = [V1Evidence(type="dns_entropy", source="dns_features", timestamp=_t_repeat,
-                                  device="devRepeat", value=4.5, confidence=0.8,
-                                  independence_group="dns_behavior")]
+                                  device="devRepeat", value=4.5, confidence=0.8)]
 for _cycle in range(5):
     live_engine.evaluate(_repeating_v1_ev, ReputationVector(domain="", tier=3), features={},
                             device_id="devRepeat", now=_t_repeat + _cycle * 2)
@@ -295,8 +294,7 @@ check("E: the SAME v1 evidence item (identical device/type/source/timestamp) han
       f"got {len(_dedup_store.get_evidence_for_device('devRepeat'))} rows")
 
 _new_v1_ev = [V1Evidence(type="dns_entropy", source="dns_features", timestamp=_t_repeat + 100,
-                            device="devRepeat", value=4.5, confidence=0.8,
-                            independence_group="dns_behavior")]
+                            device="devRepeat", value=4.5, confidence=0.8)]
 live_engine.evaluate(_repeating_v1_ev + _new_v1_ev, ReputationVector(domain="", tier=3),
                         features={}, device_id="devRepeat", now=_t_repeat + 100)
 check("E: a GENUINELY new evidence item (different timestamp) alongside the same repeated "
@@ -379,7 +377,7 @@ def _capture_merged(v1_evidence, rep, device_id, now, features=None, device_type
 
 # --- F1: cross-device correlation ---
 devA_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_ft0, device="p1a_devA",
-                        value=10.0, confidence=0.9, independence_group="dns_behavior",
+                        value=10.0, confidence=0.9,
                         domain="shared-target.example.com")]
 merged_A = _capture_merged(devA_ev, ReputationVector(domain="", tier=3), "p1a_devA", _ft0)
 check("F1: the FIRST device to touch a destination gets no coordinated_targeting "
@@ -387,7 +385,7 @@ check("F1: the FIRST device to touch a destination gets no coordinated_targeting
       not any(e.evidence_type == "coordinated_targeting" for e in merged_A))
 
 devB_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_ft0 + 10, device="p1a_devB",
-                        value=10.0, confidence=0.9, independence_group="dns_behavior",
+                        value=10.0, confidence=0.9,
                         domain="shared-target.example.com")]
 merged_B = _capture_merged(devB_ev, ReputationVector(domain="", tier=3), "p1a_devB", _ft0 + 10)
 check("F1: REGRESSION GUARD (third-party architecture review, 2026-09-09) -- the "
@@ -397,7 +395,7 @@ check("F1: REGRESSION GUARD (third-party architecture review, 2026-09-09) -- the
       not any(e.evidence_type == "coordinated_targeting" for e in merged_B))
 
 devB2_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_ft0 + 11, device="p1a_devB2",
-                         value=10.0, confidence=0.9, independence_group="dns_behavior",
+                         value=10.0, confidence=0.9,
                          domain="shared-target.example.com")]
 merged_B2 = _capture_merged(devB2_ev, ReputationVector(domain="", tier=3), "p1a_devB2", _ft0 + 11)
 coordinated_hits = [e for e in merged_B2 if e.evidence_type == "coordinated_targeting"]
@@ -410,7 +408,7 @@ check("F1: the THIRD device (3 total) to touch the SAME destination within the s
 # pinging a hub), never coordinated_targeting -- real alert: 192.168.77.25 (Echo) pinged.
 for _i in range(3):
     _lan_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_ft0 + 20 + _i, device=f"p1a_lan{_i}",
-                            value=10.0, confidence=0.9, independence_group="dns_behavior",
+                            value=10.0, confidence=0.9,
                             domain="192.168.77.25")]
     merged_lan = _capture_merged(_lan_ev, ReputationVector(domain="", tier=3), f"p1a_lan{_i}", _ft0 + 20 + _i)
 check("F1: 3+ devices touching a private/LAN IP get NO coordinated_targeting evidence",
@@ -455,15 +453,15 @@ class _FakeGeoipEngine:
 # guards. Three devices isolates the ASN-owner check specifically: it must still
 # suppress coordination even when the device-count bar WOULD otherwise clear.
 devD_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_ft0 + 15, device="p1a_devD",
-                        value=10.0, confidence=0.9, independence_group="dns_behavior",
+                        value=10.0, confidence=0.9,
                         domain="45.57.41.1")]
 merged_D = _capture_merged(devD_ev, ReputationVector(domain="", tier=3), "p1a_devD", _ft0 + 15)
 devD2_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_ft0 + 15.5, device="p1a_devD2",
-                         value=10.0, confidence=0.9, independence_group="dns_behavior",
+                         value=10.0, confidence=0.9,
                          domain="45.57.41.1")]
 merged_D2 = _capture_merged(devD2_ev, ReputationVector(domain="", tier=3), "p1a_devD2", _ft0 + 15.5)
 devE_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_ft0 + 16, device="p1a_devE",
-                        value=10.0, confidence=0.9, independence_group="dns_behavior",
+                        value=10.0, confidence=0.9,
                         domain="45.57.41.1")]
 cdn_geoip = _FakeGeoipEngine({"45.57.41.1": "Netflix, Inc."})
 merged_E = _capture_merged(devE_ev, ReputationVector(domain="", tier=3), "p1a_devE", _ft0 + 16,
@@ -477,15 +475,15 @@ check("F1b: BUGFIX -- THREE devices independently reaching a recognized CDN/"
 # REGRESSION GUARD: same shared destination, same device count, but the ASN owner
 # is NOT a recognized cloud/CDN org -- real coordination still fires normally.
 devF_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_ft0 + 17, device="p1a_devF",
-                        value=10.0, confidence=0.9, independence_group="dns_behavior",
+                        value=10.0, confidence=0.9,
                         domain="203.0.113.9")]
 merged_F0 = _capture_merged(devF_ev, ReputationVector(domain="", tier=3), "p1a_devF", _ft0 + 17)
 devF2_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_ft0 + 17.5, device="p1a_devF2",
-                         value=10.0, confidence=0.9, independence_group="dns_behavior",
+                         value=10.0, confidence=0.9,
                          domain="203.0.113.9")]
 merged_F2 = _capture_merged(devF2_ev, ReputationVector(domain="", tier=3), "p1a_devF2", _ft0 + 17.5)
 devG_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_ft0 + 18, device="p1a_devG",
-                        value=10.0, confidence=0.9, independence_group="dns_behavior",
+                        value=10.0, confidence=0.9,
                         domain="203.0.113.9")]
 noncdn_geoip = _FakeGeoipEngine({"203.0.113.9": "Some Random Hosting LLC"})
 merged_G = _capture_merged(devG_ev, ReputationVector(domain="", tier=3), "p1a_devG", _ft0 + 18,
@@ -498,15 +496,15 @@ check("F1b: REGRESSION GUARD -- an unrecognized ASN owner is unaffected; genuine
 # REGRESSION GUARD: omitting geoip_engine entirely (every pre-existing caller) is
 # completely unaffected -- same CDN-owned destination, still fires without one.
 devH_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_ft0 + 19, device="p1a_devH",
-                        value=10.0, confidence=0.9, independence_group="dns_behavior",
+                        value=10.0, confidence=0.9,
                         domain="45.57.42.1")]
 merged_H0 = _capture_merged(devH_ev, ReputationVector(domain="", tier=3), "p1a_devH", _ft0 + 19)
 devH2_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_ft0 + 19.5, device="p1a_devH2",
-                         value=10.0, confidence=0.9, independence_group="dns_behavior",
+                         value=10.0, confidence=0.9,
                          domain="45.57.42.1")]
 merged_H2 = _capture_merged(devH2_ev, ReputationVector(domain="", tier=3), "p1a_devH2", _ft0 + 19.5)
 devI_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_ft0 + 20, device="p1a_devI",
-                        value=10.0, confidence=0.9, independence_group="dns_behavior",
+                        value=10.0, confidence=0.9,
                         domain="45.57.42.1")]
 merged_I = _capture_merged(devI_ev, ReputationVector(domain="", tier=3), "p1a_devI", _ft0 + 20)
 check("F1b: REGRESSION GUARD -- omitting geoip_engine (unchanged default), 3 total "
@@ -517,7 +515,7 @@ check("F1b: REGRESSION GUARD -- omitting geoip_engine (unchanged default), 3 tot
 # --- F2: reputation propagation ---
 _f_store.set_destination_reputation("evil-shared.example.com", tier=5, timestamp=_ft0)
 devC_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_ft0 + 20, device="p1a_devC",
-                        value=10.0, confidence=0.9, independence_group="dns_behavior",
+                        value=10.0, confidence=0.9,
                         domain="evil-shared.example.com")]
 merged_C = _capture_merged(devC_ev, ReputationVector(domain="", tier=3), "p1a_devC", _ft0 + 20)
 rep_hits = [e for e in merged_C if e.evidence_type == "reputation"
@@ -533,7 +531,7 @@ check("F2: the propagated evidence was NEVER written to the graph itself",
               for e in _f_store.get_evidence_for_device("p1a_devC")))
 
 devD_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_ft0 + 20, device="p1a_devD",
-                        value=10.0, confidence=0.9, independence_group="dns_behavior",
+                        value=10.0, confidence=0.9,
                         domain="never-confirmed.example.com")]
 merged_D = _capture_merged(devD_ev, ReputationVector(domain="", tier=3), "p1a_devD", _ft0 + 20)
 check("F2: a device touching a DIFFERENT, never-confirmed destination gets no "
@@ -542,7 +540,7 @@ check("F2: a device touching a DIFFERENT, never-confirmed destination gets no "
 
 _f_store.set_destination_reputation("weak-tier.example.com", tier=4, timestamp=_ft0)
 devE_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_ft0 + 20, device="p1a_devE",
-                        value=10.0, confidence=0.9, independence_group="dns_behavior",
+                        value=10.0, confidence=0.9,
                         domain="weak-tier.example.com")]
 merged_E = _capture_merged(devE_ev, ReputationVector(domain="", tier=3), "p1a_devE", _ft0 + 20)
 check("F2: a cached tier BELOW the corroborated threshold (4, not 5) does not propagate "
@@ -553,7 +551,7 @@ check("F2: a cached tier BELOW the corroborated threshold (4, not 5) does not pr
 _f_store.set_destination_reputation("stale.example.com", tier=5,
                                        timestamp=_ft0 - live_engine._REPUTATION_PROPAGATION_TTL_SECONDS - 1)
 devF_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_ft0 + 20, device="p1a_devF",
-                        value=10.0, confidence=0.9, independence_group="dns_behavior",
+                        value=10.0, confidence=0.9,
                         domain="stale.example.com")]
 merged_F = _capture_merged(devF_ev, ReputationVector(domain="", tier=3), "p1a_devF", _ft0 + 20)
 check("F2: a cached reputation entry OLDER than the propagation TTL does not propagate "
@@ -562,7 +560,7 @@ check("F2: a cached reputation entry OLDER than the propagation TTL does not pro
 
 # --- F3: genuine first-contact scoring ---
 devG_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_ft0 + 30, device="p1a_devG",
-                        value=10.0, confidence=0.9, independence_group="dns_behavior",
+                        value=10.0, confidence=0.9,
                         domain="brand-new.example.com")]
 merged_G1 = _capture_merged(devG_ev, ReputationVector(domain="", tier=3), "p1a_devG", _ft0 + 30)
 check("F3: a destination this device has NEVER contacted before gets a first_contact "
@@ -575,7 +573,7 @@ check("F3: the first_contact evidence was NEVER written to the graph itself",
 # cycle's own persisted evidence for this destination now falls OUTSIDE the excluded
 # "current incident" window, so domain_seen_before() correctly finds it familiar now.
 devG_ev2 = [V1Evidence(type="dns_rate", source="dns", timestamp=_ft0 + 30 + 400, device="p1a_devG",
-                         value=10.0, confidence=0.9, independence_group="dns_behavior",
+                         value=10.0, confidence=0.9,
                          domain="brand-new.example.com")]
 merged_G2 = _capture_merged(devG_ev2, ReputationVector(domain="", tier=3), "p1a_devG", _ft0 + 30 + 400)
 check("F3: a SECOND cycle contacting the SAME destination, well after the current-"
@@ -589,7 +587,7 @@ check("F3: a SECOND cycle contacting the SAME destination, well after the curren
 
 # G1: fingerprint correlation
 devH_ev = [V1Evidence(type="malicious_ja3", source="zeek", timestamp=_ft0 + 500, device="p1a_devH",
-                        value=1.0, confidence=0.95, independence_group="zeek_network",
+                        value=1.0, confidence=0.95,
                         provenance="detector:zeek:malicious_ja3:campaignhash", domain="c2-a.example.com")]
 merged_H1 = _capture_merged(devH_ev, ReputationVector(domain="", tier=3), "p1a_devH", _ft0 + 500)
 check("G1: the FIRST device with this JA3 fingerprint gets no fingerprint_campaign "
@@ -597,7 +595,7 @@ check("G1: the FIRST device with this JA3 fingerprint gets no fingerprint_campai
       not any(e.evidence_type == "fingerprint_campaign" for e in merged_H1))
 
 devI_ev = [V1Evidence(type="malicious_ja3", source="zeek", timestamp=_ft0 + 510, device="p1a_devI",
-                        value=1.0, confidence=0.95, independence_group="zeek_network",
+                        value=1.0, confidence=0.95,
                         provenance="detector:zeek:malicious_ja3:campaignhash", domain="c2-b.example.com")]
 merged_I0 = _capture_merged(devI_ev, ReputationVector(domain="", tier=3), "p1a_devI", _ft0 + 510)
 check("G1: REGRESSION GUARD (third-party architecture review, 2026-09-09) -- the "
@@ -607,7 +605,7 @@ check("G1: REGRESSION GUARD (third-party architecture review, 2026-09-09) -- the
       not any(e.evidence_type == "fingerprint_campaign" for e in merged_I0))
 
 devI2_ev = [V1Evidence(type="malicious_ja3", source="zeek", timestamp=_ft0 + 511, device="p1a_devI2",
-                         value=1.0, confidence=0.95, independence_group="zeek_network",
+                         value=1.0, confidence=0.95,
                          provenance="detector:zeek:malicious_ja3:campaignhash", domain="c2-b2.example.com")]
 merged_I1 = _capture_merged(devI2_ev, ReputationVector(domain="", tier=3), "p1a_devI2", _ft0 + 511)
 fingerprint_hits = [e for e in merged_I1 if e.evidence_type == "fingerprint_campaign"]
@@ -623,7 +621,7 @@ check("G1: fingerprint_campaign was NEVER written to the graph itself",
 
 # A different fingerprint hash on the same cycle correctly does NOT correlate
 devJ_ev = [V1Evidence(type="malicious_ja3", source="zeek", timestamp=_ft0 + 520, device="p1a_devJ",
-                        value=1.0, confidence=0.95, independence_group="zeek_network",
+                        value=1.0, confidence=0.95,
                         provenance="detector:zeek:malicious_ja3:unrelatedhash", domain="c2-c.example.com")]
 merged_J1 = _capture_merged(devJ_ev, ReputationVector(domain="", tier=3), "p1a_devJ", _ft0 + 520)
 check("G1: a DIFFERENT JA3 hash, even at the same evidence_type and a similar "
@@ -633,14 +631,14 @@ check("G1: a DIFFERENT JA3 hash, even at the same evidence_type and a similar "
 # G2: DGA-shape correlation -- two devices hitting DIFFERENT domains generated by
 # the SAME shape (8-char, all-lowercase-hex-look-alike... actually alpha, same TLD)
 devK_ev = [V1Evidence(type="dns_dga_burst", source="pihole", timestamp=_ft0 + 600, device="p1a_devK",
-                        value=1.0, confidence=0.9, independence_group="dns_behavior",
+                        value=1.0, confidence=0.9,
                         domain="abcdefgh.ru")]
 merged_K1 = _capture_merged(devK_ev, ReputationVector(domain="", tier=3), "p1a_devK", _ft0 + 600)
 check("G2: the FIRST device with this DGA shape gets no dga_seed_campaign evidence",
       not any(e.evidence_type == "dga_seed_campaign" for e in merged_K1))
 
 devL_ev = [V1Evidence(type="dns_dga_burst", source="pihole", timestamp=_ft0 + 610, device="p1a_devL",
-                        value=1.0, confidence=0.9, independence_group="dns_behavior",
+                        value=1.0, confidence=0.9,
                         domain="qrstuvwx.ru")]  # DIFFERENT literal domain, SAME shape (8 letters, .ru)
 merged_L0 = _capture_merged(devL_ev, ReputationVector(domain="", tier=3), "p1a_devL", _ft0 + 610)
 check("G2: REGRESSION GUARD (third-party architecture review, 2026-09-09) -- the "
@@ -650,7 +648,7 @@ check("G2: REGRESSION GUARD (third-party architecture review, 2026-09-09) -- the
       not any(e.evidence_type == "dga_seed_campaign" for e in merged_L0))
 
 devL2_ev = [V1Evidence(type="dns_dga_burst", source="pihole", timestamp=_ft0 + 611, device="p1a_devL2",
-                         value=1.0, confidence=0.9, independence_group="dns_behavior",
+                         value=1.0, confidence=0.9,
                          domain="ijklmnop.ru")]  # THIRD device, another literal domain, SAME shape
 merged_L1 = _capture_merged(devL2_ev, ReputationVector(domain="", tier=3), "p1a_devL2", _ft0 + 611)
 dga_hits = [e for e in merged_L1 if e.evidence_type == "dga_seed_campaign"]
@@ -667,7 +665,7 @@ check("G2: dga_seed_campaign was NEVER written to the graph itself",
 
 # A domain with a genuinely different shape does NOT correlate
 devM_ev = [V1Evidence(type="dns_dga_burst", source="pihole", timestamp=_ft0 + 620, device="p1a_devM",
-                        value=1.0, confidence=0.9, independence_group="dns_behavior",
+                        value=1.0, confidence=0.9,
                         domain="ab12.com")]  # different length, different TLD, different charset
 merged_M1 = _capture_merged(devM_ev, ReputationVector(domain="", tier=3), "p1a_devM", _ft0 + 620)
 check("G2: a genuinely different DGA shape (length/TLD/charset all differ) does "
@@ -708,7 +706,7 @@ _f_store.record_device_destinations(
     "p1a_devN", [f"anomalous-{i}.example.com" for i in range(6)], timestamp=_h0 + 10)
 
 devN_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_h0 + 20, device="p1a_devN",
-                        value=10.0, confidence=0.9, independence_group="dns_behavior",
+                        value=10.0, confidence=0.9,
                         domain="anomalous-5.example.com")]
 merged_N1 = _capture_merged(devN_ev, ReputationVector(domain="", tier=3), "p1a_devN", _h0 + 20, device_type="iot")
 peer_dev_hits = [e for e in merged_N1 if e.evidence_type == "peer_deviation"]
@@ -730,7 +728,7 @@ check("H1: this device's OWN device_type was persisted onto its graph metadata "
 # REGRESSION GUARD: a device with a LOW, in-line-with-peers count does NOT trigger
 _f_store.record_device_destinations("p1a_devO", ["normal.example.com"], timestamp=_h0 + 30)
 devO_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_h0 + 31, device="p1a_devO",
-                        value=10.0, confidence=0.9, independence_group="dns_behavior",
+                        value=10.0, confidence=0.9,
                         domain="normal.example.com")]
 merged_O1 = _capture_merged(devO_ev, ReputationVector(domain="", tier=3), "p1a_devO", _h0 + 31, device_type="iot")
 check("H1: REGRESSION GUARD -- a device whose destination count is in line with "
@@ -757,7 +755,7 @@ for peer_id, dests in (("p1a_unk_peer1", ["u1.example.com", "u2.example.com"]),
 _f_store.record_device_destinations(
     "p1a_devU", [f"unk-anomalous-{i}.example.com" for i in range(6)], timestamp=_h0 + 50)
 devU_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_h0 + 56, device="p1a_devU",
-                        value=10.0, confidence=0.9, independence_group="dns_behavior",
+                        value=10.0, confidence=0.9,
                         domain="unk-anomalous-5.example.com")]
 merged_U1 = _capture_merged(devU_ev, ReputationVector(domain="", tier=3), "p1a_devU", _h0 + 56, device_type="unknown")
 check("H2: BUGFIX -- device_type=='unknown' is treated the same as empty; even "
@@ -774,7 +772,7 @@ _f_store.record_device_destinations("p1a_devQ_peer", ["q1.example.com"], timesta
 _f_store.record_device_destinations(
     "p1a_devQ", [f"cam-anomalous-{i}.example.com" for i in range(6)], timestamp=_h0 + 51)
 devQ_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_h0 + 60, device="p1a_devQ",
-                        value=10.0, confidence=0.9, independence_group="dns_behavior",
+                        value=10.0, confidence=0.9,
                         domain="cam-anomalous-5.example.com")]
 merged_Q1 = _capture_merged(devQ_ev, ReputationVector(domain="", tier=3), "p1a_devQ", _h0 + 60, device_type="camera")
 check("H2: REGRESSION GUARD -- only 1 real peer of this type (need >=3) means no "
@@ -828,10 +826,10 @@ _f_store.get_devices_with_metadata_value = lambda *a, **kw: (_ for _ in ()).thro
                     "the live per-cycle path -- the cache replaced it"))
 try:
     h4a_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_h4_0 + 10, device="p1a_h4_devA",
-                           value=10.0, confidence=0.9, independence_group="dns_behavior",
+                           value=10.0, confidence=0.9,
                            domain="h4-anom-5.example.com")]
     h4b_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_h4_0 + 11, device="p1a_h4_devB",
-                           value=10.0, confidence=0.9, independence_group="dns_behavior",
+                           value=10.0, confidence=0.9,
                            domain="h4-anom2-5.example.com")]
     merged_H4A = _capture_merged(h4a_ev, ReputationVector(domain="", tier=3), "p1a_h4_devA",
                                    _h4_0 + 10, device_type="router")
@@ -889,7 +887,7 @@ def _i_promote(device_id, parameter, new_value, at):
 # hard_stop_candidate_sensitivity: a suricata match at confidence=0.7 (below the
 # DEFAULT 0.9 bar) doesn't clear the bar at all -- no hard-stop branch fires.
 suricata_ev = [V1Evidence(type="suricata_signature_match", source="suricata", timestamp=now, device="devSheet03a",
-                            value=1.0, confidence=0.7, independence_group="signature_match")]
+                            value=1.0, confidence=0.7)]
 r_before = live_engine.evaluate(suricata_ev, ReputationVector(domain="", tier=3), features={},
                                    device_id="devSheet03a", now=now)
 check("I: hard_stop_candidate_sensitivity default (0.9) -- a 0.7-confidence suricata "
@@ -911,7 +909,7 @@ check("I: hard_stop_candidate_sensitivity promoted to 0.6 -- the SAME 0.7-confid
 # scoped per-device, not a global flip.
 r_other_device = live_engine.evaluate(
     [V1Evidence(type="suricata_signature_match", source="suricata", timestamp=now, device="devSheet03a_untouched",
-                 value=1.0, confidence=0.7, independence_group="signature_match")],
+                 value=1.0, confidence=0.7)],
     ReputationVector(domain="", tier=3), features={}, device_id="devSheet03a_untouched", now=now + 1)
 check("I: hard_stop_candidate_sensitivity promotion is scoped to the specific device "
       "it was promoted for -- a different device with no promotion of its own still "
@@ -1047,7 +1045,7 @@ check("J5: FAIL-SAFE -- a broken graph read for baseline scoring never raises ou
 live_engine._last_risk_score.pop("devJ6", None)
 r_j6_first = live_engine.evaluate(
     [V1Evidence(type="suricata_signature_match", source="suricata", timestamp=_j0, device="devJ6",
-                 value=1.0, confidence=0.95, independence_group="signature_match")],
+                 value=1.0, confidence=0.95)],
     ReputationVector(domain="", tier=3), features={}, device_id="devJ6", now=_j0)
 check("J6: after one evaluate() call with a real device_id, _last_risk_score is "
       "populated with THIS cycle's own attack-hypothesis score (for the NEXT cycle's "

@@ -142,7 +142,7 @@ check("verified_ioc=False with ZERO corroborating evidence now lands at SUSPICIO
 
 lateral_scan_evidence = fresh_store([
     Evidence(type="zeek_lateral_scan", source="zeek", timestamp=time.time(), device="dev_corrob5",
-             value=5.0, confidence=0.9, independence_group="zeek_network"),
+             value=5.0, confidence=0.9),
 ], "dev_corrob5")
 decision_one_family = de.evaluate(lateral_scan_evidence, rep_bare_abuse)
 check("verified_ioc=False with only ONE independent behavioural family stays SUSPICIOUS -- an unverified "
@@ -150,9 +150,9 @@ check("verified_ioc=False with only ONE independent behavioural family stays SUS
       decision_one_family["state"] == "SUSPICIOUS", f"got {decision_one_family}")
 two_family_evidence = fresh_store([
     Evidence(type="zeek_lateral_scan", source="zeek", timestamp=time.time(), device="dev_corrob5b",
-             value=5.0, confidence=0.9, independence_group="zeek_network"),
+             value=5.0, confidence=0.9),
     Evidence(type="dns_dga_burst", source="threat_signals", timestamp=time.time(), device="dev_corrob5b",
-             value=20.0, confidence=0.9, independence_group="dns"),
+             value=20.0, confidence=0.9),
 ], "dev_corrob5b")
 decision_corroborated = de.evaluate(two_family_evidence, rep_bare_abuse)
 check("verified_ioc=False corroborated by two independent behavioural families (attack > benign) reaches "

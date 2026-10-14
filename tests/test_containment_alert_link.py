@@ -21,6 +21,7 @@ if str(SRC_DIR) not in sys.path:
 
 from core.state_guard import StateManager  # noqa: E402
 from mitigation.ips import IPSMitigator  # noqa: E402
+from mitigation.containment_gate import MONITOR_ONLY, ContainmentAuthorization  # noqa: E402
 
 MAC = "aa:bb:cc:00:00:01"
 REF = {"incident_id": "d1|bad.example|DGA_BOTNET_C2", "signature": "DGA_BOTNET_C2", "target_source": "dns_dga_burst",
@@ -71,8 +72,7 @@ def env(tmp_path, monkeypatch):
 
 
 def test_every_action_records_its_alert_and_is_returned(env):
-    res = env.m.mitigate(env.st, target_domain="bad.example", risk_score=9.6, lateral_threat=False, is_safe=False,
-                         decision_state="CRITICAL", alert_ref=REF)
+    res = env.m.mitigate(env.st, target_domain="bad.example", risk_score=9.6, authorization=ContainmentAuthorization("corroborated"), is_safe=False, alert_ref=REF)
     ips = env.sm.get_ips_state()
     assert ips["blocked_domains"]["bad.example"]["alert"] == REF
     assert env.m._router_isolated_devices[MAC]["alert"] == REF
@@ -83,8 +83,7 @@ def test_every_action_records_its_alert_and_is_returned(env):
 
 
 def test_domain_blocked_label_only_for_the_incident_that_caused_it(env):
-    env.m.mitigate(env.st, target_domain="bad.example", risk_score=5.0, lateral_threat=False, is_safe=False,
-                   decision_state="HIGH", alert_ref=REF)
+    env.m.mitigate(env.st, target_domain="bad.example", risk_score=5.0, authorization=ContainmentAuthorization("corroborated"), is_safe=False, alert_ref=REF)
     same = env.m.get_containment_status("10.0.0.5", "unknown", domain="bad.example", dev_id="dx",
                                         incident_id=REF["incident_id"])
     other = env.m.get_containment_status("10.0.0.5", "unknown", domain="bad.example", dev_id="dx",
@@ -96,11 +95,9 @@ def test_domain_blocked_label_only_for_the_incident_that_caused_it(env):
 
 
 def test_an_already_listed_domain_is_not_this_alerts_block(env):
-    env.m.mitigate(env.st, target_domain="bad.example", risk_score=5.0, lateral_threat=False, is_safe=False,
-                   decision_state="HIGH", alert_ref=REF)
+    env.m.mitigate(env.st, target_domain="bad.example", risk_score=5.0, authorization=ContainmentAuthorization("corroborated"), is_safe=False, alert_ref=REF)
     later = dict(REF, incident_id="d1|bad.example|C2_BEACONING")
-    res = env.m.mitigate(env.st, target_domain="bad.example", risk_score=5.0, lateral_threat=False, is_safe=False,
-                         decision_state="HIGH", alert_ref=later)
+    res = env.m.mitigate(env.st, target_domain="bad.example", risk_score=5.0, authorization=ContainmentAuthorization("corroborated"), is_safe=False, alert_ref=later)
     assert res["domain_blocked"] is None and res["actions"] == []
     assert env.sm.get_ips_state()["blocked_domains"]["bad.example"]["alert"] == REF       # the cause is kept
 
@@ -109,8 +106,7 @@ def test_an_already_listed_domain_is_not_this_alerts_block(env):
 
 def test_interactive_mode_queues_the_domain_block_instead_of_blocking(env):
     env.m.config["interactive_blocking_enabled"] = True
-    res = env.m.mitigate(env.st, target_domain="bad.example", risk_score=5.0, lateral_threat=False, is_safe=False,
-                         decision_state="HIGH", alert_ref=REF)
+    res = env.m.mitigate(env.st, target_domain="bad.example", risk_score=5.0, authorization=ContainmentAuthorization("corroborated"), is_safe=False, alert_ref=REF)
     assert res["pending_domain_block"] == "bad.example" and res["domain_blocked"] is None
     assert "bad.example" not in env.sm.get_ips_state()["blocked_domains"]
 

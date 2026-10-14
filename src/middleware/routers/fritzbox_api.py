@@ -10,6 +10,7 @@ from fritzconnection.core.exceptions import FritzConnectionException, FritzActio
 from middleware.auth import verify_token, CONFIG, LOGGER
 from core.state_guard import StateManager
 from mitigation.ips import IPSMitigator
+from mitigation.containment_gate import OPERATOR_APPROVED
 from mitigation.router_adapter import get_router_adapter
 from pathlib import Path
 
@@ -262,14 +263,16 @@ def _ipc_block_logic(target: str):
             LOGGER.warning("Could not record the operator confirmation for %s: %s", dev_id, exc)
         with sm.lock_device(dev_id) as state:
         
+            # The person approved: OPERATOR_APPROVED executes (U1, 2026-10-14). Before, this passed a plain
+            # CRITICAL state, and mitigate() re-queued the action for approval in interactive mode and for a
+            # critical-role device -- the approval never ran in exactly the cases that ask for one.
             ips.mitigate(
                 st=state,
                 target_domain="-",
                 risk_score=10.0,
-                lateral_threat=False,
+                authorization=OPERATOR_APPROVED,
                 is_safe=False,
                 reason="Operator explicitly approved hardware isolation.",
-                decision_state="CRITICAL"
             )
         
         sm.flush_to_disk()

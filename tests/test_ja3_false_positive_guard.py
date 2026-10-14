@@ -74,8 +74,7 @@ def test_repeated_connections_to_the_same_server_do_not_trip_the_self_check():
 
 def test_alert_text_shows_hash_source_and_caveat():
     ja3_provenance.set_source("et_open", {WIN11: "ET Open rule sid 2028302"})
-    ev = Evidence(type="malicious_ja3", source="zeek", timestamp=1.0, device="d", value=1.0, confidence=0.95,
-                  independence_group="zeek_network", provenance=f"detector:zeek:malicious_ja3:{WIN11}",
+    ev = Evidence(type="malicious_ja3", source="zeek", timestamp=1.0, device="d", value=1.0, confidence=0.95, provenance=f"detector:zeek:malicious_ja3:{WIN11}",
                   domain="ic3.events.data.microsoft.com")
     text = pipeline._describe_evidence(ev)
     assert "ic3.events.data.microsoft.com" in text

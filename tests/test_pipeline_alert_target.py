@@ -50,21 +50,22 @@ p.zeek_collector.poll = (lambda: [
 # The window's "most notable domain": the old fallback put it on every alert without its own domain.
 p._select_target_domain = lambda st, ti: "bystander.example"
 p.evidence_store.add(Evidence(type="arp_sweep", source="threat_signals", timestamp=now, device="scanner", value=23.0,
-                              confidence=0.8, independence_group="lan_recon",
+                              confidence=0.8,
                               provenance="detector:threat_signals:arp_sweep:arp_sweep:test", domain="10.9.0.2",
                               targets=("10.9.0.2", "10.9.0.3", "10.9.0.4"), target_count=23))
 
-real_evaluate = live.evaluate
+real_evaluate_cycle = live.evaluate_cycle   # the pipeline's call (U7: returns the decision and its cycle)
 
 
 def evaluate(*a, **k):
-    d = dict(real_evaluate(*a, **k))
+    real, cycle = real_evaluate_cycle(*a, **k)
+    d = dict(real)
     d.update(state=pipeline_mod.DecisionState.SUSPICIOUS, explanation="INTERNAL_RECONNAISSANCE",
              threat_confidence=0.4, decision_path="hypothesis_suspicious", action="monitor")
-    return d
+    return d, cycle
 
 
-live.evaluate = evaluate
+live.evaluate_cycle = evaluate
 written = []
 real_write = p.alert_writer.write
 p.alert_writer.write = lambda payload: (written.append(payload), real_write(payload))[1]
@@ -94,13 +95,14 @@ check("signature_base / persisted_seconds are their own fields",
 # A device-level HIGH alert (no destination by design) still gets its "Mark False Positive" ledger entry: the
 # correction runs from the stored payload; it was gated on a known target, so device-level alerts lost it.
 def evaluate_high(*a, **k):
-    d = dict(real_evaluate(*a, **k))
+    real, cycle = real_evaluate_cycle(*a, **k)
+    d = dict(real)
     d.update(state=pipeline_mod.DecisionState.HIGH, explanation="PEER_COHORT_DEVIATION",
              threat_confidence=0.85, decision_path="hypothesis_high", action="alert")
-    return d
+    return d, cycle
 
 
-live.evaluate = evaluate_high
+live.evaluate_cycle = evaluate_high
 # W-10 remainder: the containment an alert causes is linked to the alert's graph event.
 linked = []
 _graph = live.get_graph_store()
@@ -161,13 +163,14 @@ p.config["interactive_blocking_enabled"] = True
 
 
 def evaluate_high_mid(*a, **k):
-    d = dict(real_evaluate(*a, **k))
+    real, cycle = real_evaluate_cycle(*a, **k)
+    d = dict(real)
     d.update(state=pipeline_mod.DecisionState.HIGH, explanation="DATA_EXFILTRATION",   # a new incident: notified
              threat_confidence=0.6, decision_path="hypothesis_high", action="alert")
-    return d
+    return d, cycle
 
 
-live.evaluate = evaluate_high_mid
+live.evaluate_cycle = evaluate_high_mid
 if p.ips_mitigator is not None:
     p.ips_mitigator.mitigate = lambda *a, **k: {"actions": [], "domain_blocked": None,
                                                 "pending_domain_block": "queued.example"}

@@ -143,7 +143,7 @@ check("a genuinely unexplained destination (no DNS match, not CDN, not VPN) fire
 if ev_unexplained:
     e = ev_unexplained[0]
     check("evidence type is dns_evasion_anomaly", e.type == "dns_evasion_anomaly")
-    check("evidence independence_group is blindspot_audit", e.independence_group == "blindspot_audit")
+    check("evidence family is dns_behavior (the one registry, W-13)", e.family == "dns_behavior")
     check("evidence value equals the unexplained-connection count", e.value == 1.0)
 
 # B5: no DNS history at all + unexplained connection -> higher confidence than a
@@ -229,7 +229,7 @@ check("no evidence at all -> hypothesis doesn't fire", hyp.evaluate([], neutral_
 
 # A classified shape (no DNS history at all); the ambiguous "attribution gap" shape is capped, see below.
 anomaly_only = [Evidence(type="dns_evasion_anomaly", source="dns_evasion", timestamp=time.time(),
-                          device=DEV, value=1.0, confidence=0.7, independence_group="blindspot_audit",
+                          device=DEV, value=1.0, confidence=0.7,
                           provenance="detector:dns_evasion:no_dns_history:test")]
 score_alone = hyp.evaluate(anomaly_only, neutral_rep)
 check("dns_evasion_anomaly alone satisfies the required condition and scores >= 2.0",
@@ -239,14 +239,14 @@ check("dns_evasion_anomaly alone does not reach the 'strong' bonus score",
 
 corroborated = anomaly_only + [
     Evidence(type="reputation", source="threat_intel", timestamp=time.time(),
-             device=DEV, value=1.0, confidence=0.9, independence_group="reputation"),
+             device=DEV, value=1.0, confidence=0.9),
 ]
 score_corroborated = hyp.evaluate(corroborated, neutral_rep)
 check("dns_evasion_anomaly + a second independent evidence type reaches the 'strong' bonus score",
       score_corroborated == 4.0, f"got {score_corroborated}")
 
 ambiguous = [Evidence(type="dns_evasion_anomaly", source="dns_evasion", timestamp=time.time(),
-                      device=DEV, value=1.0, confidence=0.7, independence_group="blindspot_audit",
+                      device=DEV, value=1.0, confidence=0.7,
                       provenance="detector:dns_evasion:partial_attribution_gap:test")] + corroborated[1:]
 score_ambiguous = hyp.evaluate(ambiguous, neutral_rep)
 check("the ambiguous DNS_ATTRIBUTION_GAP shape stays capped at 2.0 even when corroborated",
@@ -267,7 +267,7 @@ check("DNSEvasionHypothesis is registered in HypothesisEngine.attack_hypotheses"
 hyp_naming = DNSEvasionHypothesis()
 partial_gap_evidence = [Evidence(
     type="dns_evasion_anomaly", source="dns_evasion", timestamp=time.time(), device=DEV,
-    value=1.0, confidence=0.7, independence_group="blindspot_audit",
+    value=1.0, confidence=0.7,
     provenance="detector:dns_evasion:partial_attribution_gap:1/12 unexplained",
 )]
 hyp_naming.evaluate(partial_gap_evidence, neutral_rep)
@@ -278,7 +278,7 @@ check("a partial-attribution-gap-only finding (normal DNS history, one connectio
 
 no_dns_history_evidence = [Evidence(
     type="dns_evasion_anomaly", source="dns_evasion", timestamp=time.time(), device=DEV,
-    value=1.0, confidence=0.7, independence_group="blindspot_audit",
+    value=1.0, confidence=0.7,
     provenance="detector:dns_evasion:no_dns_history:3/3 unexplained (device has NO DNS history at all in this window)",
 )]
 hyp_naming.evaluate(no_dns_history_evidence, neutral_rep)

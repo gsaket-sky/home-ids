@@ -28,40 +28,16 @@ the allowlist below), so live wiring is real, separate follow-up work, not
 bundled into this commit -- the same honest-gap pattern already used for
 Sheet 00's `risk` metric and Sheet 02's scheduler wiring.
 """
-import contextlib
-import contextvars
 import json
 import logging
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from argus.graph.store import GraphStore
 
 LOGGER = logging.getLogger("argus.autotune.engine")
-
-# Shadow evaluation (argus/shadow/sandbox.py) substitutes ONE candidate value for
-# the duration of one evaluate() call. It used to patch the class attribute
-# AutotuneEngine.get_active_value, which every thread saw: an allowlist check on
-# another thread (is_allowlisted -> _active_trust_edges ->
-# get_active_value("trust_cache_ttl_seconds")) could read the canary value while a
-# shadow call ran (runtime trace run 2, finding 4.4). A ContextVar is per thread
-# (a new thread starts with an empty context), so only the shadow call itself sees
-# the override.
-_SHADOW_OVERRIDE: "contextvars.ContextVar[Optional[Tuple[str, float]]]" = contextvars.ContextVar(
-    "autotune_shadow_override", default=None)
-
-
-@contextlib.contextmanager
-def shadow_override(parameter: str, value: float) -> Iterator[None]:
-    """Within this block, on this thread only, get_active_value(parameter) returns
-    `value` at every scope. Other threads keep reading the promoted value."""
-    token = _SHADOW_OVERRIDE.set((parameter, value))
-    try:
-        yield
-    finally:
-        _SHADOW_OVERRIDE.reset(token)
 
 # Explicit, closed allowlist -- the ONLY parameters this module may ever
 # propose a change to. (name -> (min, max, max_step_per_change)). Adding a
@@ -312,9 +288,6 @@ class AutotuneEngine:
         working unchanged (device_type defaults to None, which simply skips
         the category tier and falls straight through device -> global, the
         exact original 2-tier behavior)."""
-        override = _SHADOW_OVERRIDE.get()
-        if override is not None and override[0] == parameter:
-            return override[1]
         if device_id:
             value = self._promoted_value_at_scope(parameter, device_id, None)
             if value is not None:
@@ -362,6 +335,87 @@ class AutotuneEngine:
             (parameter, device_type, device_type),
         ).fetchone()
         return float(row["proposed_at"]) if row is not None else None
+
+    # ---------------------------------------------------------- golden guard (DETECTION_CORE_REWORK H2)
+
+    def _effective_decide_values(self, device_id: Optional[str]) -> Dict[str, Any]:
+        """The decide() parameter values a device -- or, with None, a device with no own value -- is decided with:
+        the same tiers live_engine.resolve_decision_parameters() reads (device, then global, then the champion
+        default)."""
+        from argus.ops.live_engine import CHAMPION_DEFAULTS, DECIDE_PARAMETERS
+        return {name: self.get_active_value(name, device_id, default=getattr(CHAMPION_DEFAULTS, name))
+                for name in sorted(DECIDE_PARAMETERS)}
+
+    def _decide_scopes_affected(self, parameter: str, device_id: Optional[str],
+                                device_type: Optional[str]) -> List[Tuple[str, Dict[str, Any]]]:
+        """(label, current values) for every parameter set a promotion of `parameter` at this scope would change. A
+        device scope changes that device. The global scope changes every device without its own value for
+        `parameter`: the untuned ones (the global set) and each device with other tuned decide() values. A category
+        value is not read by the live decision (resolve_decision_parameters walks device -> global); it is guarded on
+        the category's own tiers so it is safe if that changes."""
+        if device_id is not None:
+            device_id = self.store.resolve_canonical_device_id(device_id)
+            return [(f"device {device_id}", self._effective_decide_values(device_id))]
+        if device_type is not None:
+            from argus.ops.live_engine import CHAMPION_DEFAULTS, DECIDE_PARAMETERS
+            return [(f"category {device_type}", {
+                name: self.get_active_value(name, None, device_type, default=getattr(CHAMPION_DEFAULTS, name))
+                for name in sorted(DECIDE_PARAMETERS)})]
+        from argus.ops.live_engine import DECIDE_PARAMETERS
+        scopes = [("global", self._effective_decide_values(None))]
+        placeholders = ",".join("?" * len(DECIDE_PARAMETERS))
+        tuned = {self.store.resolve_canonical_device_id(r["device_id"]) for r in self.store._conn.execute(
+            f"SELECT DISTINCT device_id FROM threshold_history WHERE device_id IS NOT NULL AND parameter IN "
+            f"({placeholders}) AND promoted_at IS NOT NULL AND rolled_back_at IS NULL", sorted(DECIDE_PARAMETERS))}
+        for dev in sorted(tuned):
+            if self._promoted_value_at_scope(parameter, dev, None) is None:
+                scopes.append((f"device {dev}", self._effective_decide_values(dev)))
+        return scopes
+
+    def golden_guard_verdict(self, parameter: str, value: Any, device_id: Optional[str] = None,
+                             device_type: Optional[str] = None) -> Tuple[bool, str]:
+        """(ok, why) for promoting `value` of `parameter` at this scope (argus/golden/guard.py). In every parameter set
+        the change would reach, the candidate is compared with the same set with `parameter` at its untuned champion
+        default: any golden safety bound the candidate breaks there -- a missed attack, an over-escalated confounder,
+        containment on a basis not allowed -- is caused by this parameter's value and refuses it. Failures caused by the
+        other parameters' current values are in both and do not block this one (logged as the champion's problem).
+        One exception lets a broken value recover in bounded steps: a move strictly toward the default that adds no
+        failure to the current set. Parameters decide() does not read are not judged here. Without a golden set a
+        decide() parameter is never changed (fail closed)."""
+        from argus.ops.live_engine import CHAMPION_DEFAULTS, DECIDE_PARAMETERS
+        if parameter not in DECIDE_PARAMETERS:
+            return True, "not a decide() parameter"
+        from argus.golden import guard
+        try:
+            cases = guard.load_cases()
+        except Exception as e:  # noqa: BLE001
+            return False, f"golden guard unavailable ({type(e).__name__}: {e}); decide() parameters are never tuned unguarded"
+
+        memo: Dict[Tuple, set] = {}
+
+        def broken(values: Dict[str, Any]) -> set:
+            key = tuple(sorted(values.items()))
+            if key not in memo:
+                report = guard.run_guard(cases, overrides=values)
+                memo[key] = {(r.case_id, v) for r in report.results for v in r.violations}
+            return memo[key]
+
+        default = getattr(CHAMPION_DEFAULTS, parameter)
+        for label, current in self._decide_scopes_affected(parameter, device_id, device_type):
+            now_broken = broken(current)
+            candidate = broken({**current, parameter: value})
+            new = sorted(candidate - broken({**current, parameter: default}))
+            if now_broken:
+                LOGGER.warning("Golden guard: the current %s decision parameters already break %d bound(s): %s",
+                               label, len(now_broken), sorted(now_broken)[:3])
+            cur = current.get(parameter)
+            recovering = (default is not None and cur is not None and abs(value - default) < abs(cur - default)
+                          and candidate <= now_broken)
+            if new and not recovering:
+                detail = "; ".join(f"{case_id}: {v}" for case_id, v in new[:4])
+                more = f" (+{len(new) - 4} more)" if len(new) > 4 else ""
+                return False, f"golden guard ({label}, {parameter}={value:g}): {detail}{more}"
+        return True, "ok"
 
     # ---------------------------------------------------------- propose / canary / promote / rollback
 
@@ -516,6 +570,12 @@ class AutotuneEngine:
                         f"{_TRUST_RADIUS_MAX_STEPS:.0f} max_steps in the less-sensitive direction"
                     ))
 
+        # Golden guard (2026-10-14): a value under which a golden attack is missed, a confounder over-escalates or
+        # containment rests on a basis it may not, is never even proposed.
+        ok, why = self.golden_guard_verdict(parameter, clamped_new_value, row_device_id, row_device_type)
+        if not ok:
+            return ProposalResult(False, reason=why)
+
         # threshold_history.device_id is a real FK to devices(device_id) (schema.sql).
         # A device-scoped proposal for a device that has never yet produced graph
         # evidence (insert_evidence()/insert_decision() upserts devices as a side
@@ -604,6 +664,14 @@ class AutotuneEngine:
         if started is None or float(started["started_at"] or 0) <= float(row["proposed_at"] or 0):
             LOGGER.info("Promotion of %s withheld: backtest %s ran before the proposal", change_id,
                         confirming_backtest_run_id)
+            return False
+        # Golden guard again at promotion: the code, or other promoted values at this scope, may have changed since
+        # the proposal. A canary that now breaks a golden bound is rejected at once (rolled back), not left pending.
+        ok, why = self.golden_guard_verdict(row["parameter"], float(row["new_value"]), row["device_id"],
+                                            row["device_type"])
+        if not ok:
+            LOGGER.warning("Promotion of %s refused and rolled back: %s", change_id, why)
+            self.rollback_change(change_id, why, now=now)
             return False
         self.store._conn.execute(
             "UPDATE threshold_history SET promoted_at=? WHERE change_id=?", (now, change_id),

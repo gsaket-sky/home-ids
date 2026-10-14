@@ -1276,7 +1276,7 @@ _PEER_DEVIATION_MIN_COUNT_SAFETY_MARGIN = 1.0   # stay this far above the highes
 def _propose_peer_deviation_changes(store: GraphStore, run_id: str, now: float) -> List[Dict[str, Any]]:
     """Forward generator for BOTH peer_deviation_* parameters (2026-09-27, Phase 3 of
     the autonomy-completion effort) -- allowlisted and consumed live
-    (live_engine.py's _inject_peer_deviation_evidence()) since this same phase,
+    (live_engine.py's _gather_peer_stats()) since this same phase,
     previously two hardcoded module constants with zero autotune wiring at all.
 
     HONEST SCOPE NOTE, not hidden: this only ever LOOSENS (raises) either parameter,
@@ -1613,7 +1613,7 @@ def _propose_trust_cache_ttl_changes(store: GraphStore, run_id: str, now: float)
 def _propose_reputation_propagation_ttl_changes(store: GraphStore, run_id: str, now: float) -> List[Dict[str, Any]]:
     """Forward generator for reputation_propagation_ttl_seconds (2026-09-27, Phase
     4) -- allowlisted and consumed live (live_engine.py's
-    _inject_graph_derived_evidence()) since this same phase.
+    _gather_graph_derived()) since this same phase.
 
     HONEST SCOPE NOTE: LOOSEN-only (shortens the TTL), gated by a sample floor --
     NOT single-instance-tighten, despite trust_cache_ttl_seconds's own generator

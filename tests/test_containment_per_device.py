@@ -25,6 +25,7 @@ from core.state_guard import StateManager  # noqa: E402
 from mitigation import containment as ct  # noqa: E402
 from mitigation import l2_raw  # noqa: E402
 from mitigation.ips import IPSMitigator  # noqa: E402
+from mitigation.containment_gate import MONITOR_ONLY, ContainmentAuthorization  # noqa: E402
 
 M1, M2, M3 = "aa:bb:cc:00:00:01", "aa:bb:cc:00:00:02", "aa:bb:cc:00:00:03"
 BOGUS, GW = "00:11:22:33:44:55", "02:aa:bb:cc:dd:01"
@@ -169,21 +170,18 @@ def test_cooldown_does_not_protect_the_next_holder_of_an_address(mit, sm):
     mit.release_device("d1")
     st_d2 = SimpleNamespace(client_ip="10.0.0.5", hostname="host-d1", device_id="d2", mac_address=M2,
                             device_type="unknown", known_ips=["10.0.0.5"])
-    mit.mitigate(st_d2, target_domain="unknown", risk_score=9.5, lateral_threat=False, is_safe=False,
-                 decision_state="HIGH")
+    mit.mitigate(st_d2, target_domain="unknown", risk_score=9.5, authorization=ContainmentAuthorization("corroborated"), is_safe=False)
     assert "dev:d2" in mit._tarpit_active_targets                              # d2 is not in d1's cooldown
     st_d1 = SimpleNamespace(client_ip="10.0.0.51", hostname="host-d1", device_id="d1", mac_address=M1,
                             device_type="unknown", known_ips=[])
-    mit.mitigate(st_d1, target_domain="unknown", risk_score=9.5, lateral_threat=False, is_safe=False,
-                 decision_state="HIGH")
+    mit.mitigate(st_d1, target_domain="unknown", risk_score=9.5, authorization=ContainmentAuthorization("corroborated"), is_safe=False)
     assert "dev:d1" not in mit._tarpit_active_targets                          # d1 is, by id and MAC
 
 
 def test_mitigate_never_fabricates_a_mac_from_the_device_id(mit):
     st = SimpleNamespace(client_ip="10.0.0.77", hostname="h", device_id="0a1b2c3d4e5f", mac_address="unknown",
                          device_type="unknown", known_ips=[])
-    mit.mitigate(st, target_domain="unknown", risk_score=9.5, lateral_threat=False, is_safe=False,
-                 decision_state="HIGH")
+    mit.mitigate(st, target_domain="unknown", risk_score=9.5, authorization=ContainmentAuthorization("corroborated"), is_safe=False)
     assert mit._tarpit_active_targets == {}                                    # was: "0a:1b:2c:3d:4e:5f"
 
 

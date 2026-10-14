@@ -212,25 +212,24 @@ check("REGRESSION GUARD: the pre-existing hard_stop_verdict fixture above (no 'r
 # Argus's newer INDEPENDENCE_FAMILY_MAP name (from the decision["attack_evidence"]
 # bridge) -- two different dict keys for the identical real evidence.
 # ═══════════════════════════════════════════════════════════════════════════════════
-check("_canonical_evidence_family: dns_evasion_anomaly resolves to Argus's canonical "
-      "'dns_behavior', not v1's older 'blindspot_audit' independence_group -- the "
-      "exact real-alert mismatch this closes",
-      _canonical_evidence_family("dns_evasion_anomaly", "blindspot_audit") == "dns_behavior")
-check("_canonical_evidence_family: zeek_exfiltration resolves to Argus's canonical "
-      "'data_transfer_pattern', not v1's older 'zeek_network' independence_group",
-      _canonical_evidence_family("zeek_exfiltration", "zeek_network") == "data_transfer_pattern")
-check("_canonical_evidence_family: an evidence type NOT covered by Argus's map falls "
-      "back to the raw independence_group unchanged (e.g. a v1-only evidence type)",
-      _canonical_evidence_family("some_v1_only_evidence_type", "raw_v1_family") == "raw_v1_family")
+# W-13 (2026-10-14): one registry -- there is no older v1 family name any more, so the two source loops cannot
+# disagree on a key (the mismatch this section originally closed is impossible by construction).
+check("_canonical_evidence_family: dns_evasion_anomaly resolves to the registry family 'dns_behavior'",
+      _canonical_evidence_family("dns_evasion_anomaly") == "dns_behavior")
+check("_canonical_evidence_family: zeek_exfiltration resolves to the registry family 'data_transfer_pattern'",
+      _canonical_evidence_family("zeek_exfiltration") == "data_transfer_pattern")
+check("_canonical_evidence_family: an evidence type NOT in the registry gets the registry's visible 'unregistered' "
+      "family -- never a detector-invented name",
+      _canonical_evidence_family("some_unregistered_evidence_type") == "unregistered")
 
 _gb, _cb = {}, {}
 _ev_legacy = Evidence(type="dns_evasion_anomaly", source="dns_evasion", timestamp=time.time(),
-                       device="dev1", value=0.6, confidence=0.9, independence_group="blindspot_audit")
-_fam_legacy = _canonical_evidence_family(_ev_legacy.type, _ev_legacy.independence_group)
+                       device="dev1", value=0.6, confidence=0.9)
+_fam_legacy = _canonical_evidence_family(_ev_legacy.type)
 _route_evidence_into_buckets(_ev_legacy, _fam_legacy, _gb, _cb)
 _ev_bridged = Evidence(type="dns_evasion_anomaly", source="argus_live_engine", timestamp=time.time(),
-                        device="dev1", value=0.9, confidence=1.0, independence_group="dns_behavior")
-_fam_bridged = _canonical_evidence_family(_ev_bridged.type, _ev_bridged.independence_group)
+                        device="dev1", value=0.9, confidence=1.0)
+_fam_bridged = _canonical_evidence_family(_ev_bridged.type)
 _route_evidence_into_buckets(_ev_bridged, _fam_bridged, _gb, _cb)
 check("end-to-end: the SAME real evidence type reaching grouped_evidence through BOTH "
       "source loops (a live active_evidence item with the OLDER v1 family, and a "
@@ -244,8 +243,8 @@ check("...and keeps the HIGHER-value entry between the two (0.9 from the bridged
 
 _gb2, _cb2 = {}, {}
 _ev_local = Evidence(type="local_device_discovery", source="lan", timestamp=time.time(),
-                      device="dev1", value=1.0, confidence=1.0, independence_group="local_context")
-_route_evidence_into_buckets(_ev_local, _canonical_evidence_family(_ev_local.type, _ev_local.independence_group),
+                      device="dev1", value=1.0, confidence=1.0)
+_route_evidence_into_buckets(_ev_local, _canonical_evidence_family(_ev_local.type),
                               _gb2, _cb2)
 check("_route_evidence_into_buckets: a NON_ATTACK_FAMILIES member (local_context) is "
       "routed to context_evidence, never grouped_evidence -- never inflates the "
@@ -254,7 +253,7 @@ check("_route_evidence_into_buckets: a NON_ATTACK_FAMILIES member (local_context
 
 _gb3, _cb3 = {}, {}
 _route_evidence_into_buckets(Evidence(type="x", source="s", timestamp=time.time(), device="d",
-                                        value=1.0, confidence=1.0, independence_group="peer_cohort_deviation"),
+                                        value=1.0, confidence=1.0),
                               "peer_cohort_deviation", _gb3, _cb3)
 check("_route_evidence_into_buckets: peer_cohort_deviation (a DIFFERENT NON_ATTACK_FAMILIES "
       "member than local_context, previously only excluded by the OTHER loop's own "
@@ -281,11 +280,11 @@ check("_route_evidence_into_buckets: peer_cohort_deviation (a DIFFERENT NON_ATTA
 _hyp_dest = frozenset({"192.168.77.41"})
 _gb4, _cb4 = {}, {}
 _ev_ctc = Evidence(type="coordinated_targeting", source="argus_live_engine", timestamp=time.time(),
-                    device="dev1", value=3.0, confidence=1.0, independence_group="cross_device_correlation",
+                    device="dev1", value=3.0, confidence=1.0,
                     domain="192.168.77.41")
 _route_evidence_into_buckets(_ev_ctc, "cross_device_correlation", _gb4, _cb4, _hyp_dest)
 _ev_dns_unrelated = Evidence(type="dns_evasion_anomaly", source="dns_evasion", timestamp=time.time(),
-                              device="dev1", value=2.0, confidence=0.0, independence_group="dns_behavior",
+                              device="dev1", value=2.0, confidence=0.0,
                               domain="62.245.131.134")
 _route_evidence_into_buckets(_ev_dns_unrelated, "dns_behavior", _gb4, _cb4, _hyp_dest)
 check("_route_evidence_into_buckets: a dns_behavior item about a destination that "
@@ -296,11 +295,11 @@ check("_route_evidence_into_buckets: a dns_behavior item about a destination tha
       "dns_behavior" not in _gb4 and "dns_behavior" in _cb4)
 
 _ev_zeek_weak_wrong_dest = Evidence(type="zeek_notice_weak", source="zeek", timestamp=time.time() - 60,
-                                     device="dev1", value=1.0, confidence=0.4, independence_group="network_behavior",
+                                     device="dev1", value=1.0, confidence=0.4,
                                      domain="45.57.41.1", provenance="detector:zeek:notice:weird:window_recision")
 _route_evidence_into_buckets(_ev_zeek_weak_wrong_dest, "network_behavior", _gb4, _cb4, _hyp_dest)
 _ev_zeek_medium_right_dest = Evidence(type="zeek_notice_medium", source="zeek", timestamp=time.time(),
-                                       device="dev1", value=1.0, confidence=0.65, independence_group="network_behavior",
+                                       device="dev1", value=1.0, confidence=0.65,
                                        domain="192.168.77.41", provenance="detector:zeek:notice:SSL::Invalid_Server_Cert")
 _route_evidence_into_buckets(_ev_zeek_medium_right_dest, "network_behavior", _gb4, _cb4, _hyp_dest)
 check("THE REAL FIX: within the SAME family (network_behavior), the destination-matching "
@@ -321,7 +320,7 @@ check("net result for this exact real alert shape: fam_count = len(grouped_evide
 _gb5, _cb5 = {}, {}
 _route_evidence_into_buckets(
     Evidence(type="dns_evasion_anomaly", source="dns_evasion", timestamp=time.time(), device="d",
-              value=2.0, confidence=0.0, independence_group="dns_behavior", domain="62.245.131.134"),
+              value=2.0, confidence=0.0, domain="62.245.131.134"),
     "dns_behavior", _gb5, _cb5, frozenset())
 check("_route_evidence_into_buckets: an EMPTY hyp_destination_ids (no destination anchor "
       "for this decision at all) never demotes anything on destination grounds -- "
@@ -331,7 +330,7 @@ check("_route_evidence_into_buckets: an EMPTY hyp_destination_ids (no destinatio
 _gb6, _cb6 = {}, {}
 _route_evidence_into_buckets(
     Evidence(type="ml_anomaly", source="ml", timestamp=time.time(), device="d",
-              value=1.0, confidence=0.5, independence_group="ml_anomaly", domain=None),
+              value=1.0, confidence=0.5, domain=None),
     "ml_anomaly", _gb6, _cb6, _hyp_dest)
 check("_route_evidence_into_buckets: an evidence item with NO destination at all "
       "(domain=None) is unaffected by hyp_destination_ids -- only carries the "

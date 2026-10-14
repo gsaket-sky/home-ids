@@ -27,24 +27,15 @@ against real divergence data the way this project validates everything else (Gap
 1/2/3's own evidentiary bar). Treat this mapping itself as a hypothesis to test
 against outcomes, not a settled fact just because it's now code.
 
-KNOWN DISCREPANCY FROM THE DETECTOR EVIDENCE MODEL (found while building the decision engine,
-confirmed via direct read of hypotheses/evidence.py's EVIDENCE_FAMILIES, not
-guessed -- flagged rather than silently carried forward): evidence.py groups
-malicious_ja3/ja4, zeek_notice, zeek_lateral_scan, zeek_exfiltration,
-zeek_beaconing, zeek_conn_abuse, and zeek_long_conn ALL into one family
-("zeek_network") -- so a JA3 match plus an exfiltration signal count as ONE
-independent source there, not two. This file deliberately splits them into three
-families (tls_fingerprint, network_behavior, data_transfer_pattern) on the
-reasoning that TLS fingerprinting and traffic-volume analysis are genuinely
-different vantage points from flow-level notices. evidence.py's own grouping is
-ALSO a one-time judgment call, not something empirically validated at this
-granularity either -- so this isn't "argus fixing a known-wrong value," it's two
-independent judgment calls that happen to disagree; outcome data should settle which
-one predicts real outcomes better. Similarly, evidence.py's "dns_behavior" family also includes dns_tunnel_v2
-and dns_evasion_anomaly (which evidence.py itself further splits into separate
-"dns_tunnel_v2" and "blindspot_audit" families) -- this file's simpler
-"dns_behavior" bucket for all four DNS-related types is a real simplification
-relative to evidence.py's own three-way DNS split, not an oversight.
+HISTORY (resolved 2026-10-14, W-13): the detector Evidence model used to carry a second, coarser family vocabulary
+(hypotheses/evidence.py EVIDENCE_FAMILIES, set by each detector as a free-form `independence_group` string -- zeek_network
+for ja3/notices/exfiltration/beaconing alike, a three-way DNS split, ...). Two judgment calls disagreed on purpose here
+(this map splits zeek_network into tls_fingerprint / network_behavior / data_transfer_pattern, folds the DNS types into
+dns_behavior). That second model is gone: THIS map is the single registry, an Evidence's family is family_for(type), and
+the behaviours that read the old strings (evidence expiry, the safe-device noise filter, the family names saved on alerts)
+are stated on types and these families (tests/test_evidence_single_family_registry.py). Whether this particular
+granularity predicts real outcomes better is still an empirical question for the decision-replay data; changing it now
+means changing this one map.
 """
 from typing import Dict, FrozenSet, Iterable
 
@@ -57,7 +48,7 @@ INDEPENDENCE_FAMILY_MAP: Dict[str, str] = {
     "dns_evasion_anomaly": "dns_behavior",
     # DNSBehaviorDetector's other two evidence types (intelligence/detectors/
     # dns_behavior.py) -- evidence.py itself groups all three (rate/entropy/
-    # unique_ratio) under one independence_group="dns_behavior", so mapping
+    # unique_ratio) under the one family "dns_behavior", so mapping
     # these here too matches evidence.py's own grouping choice for this
     # detector specifically, consistent with dns_entropy above.
     "dns_rate": "dns_behavior",
@@ -134,8 +125,7 @@ INDEPENDENCE_FAMILY_MAP: Dict[str, str] = {
     "ml_anomaly": "ml_anomaly",
 
     # BENIGN-CONTEXT ONLY, deliberately excluded from attack corroboration counting
-    # by decision/engine.py (mirrors evidence.py's own ATTACK_EVIDENCE_FAMILIES =
-    # EVIDENCE_FAMILIES - {"local_context"}, hypotheses/evidence.py:71) -- real UPnP/
+    # by decision/engine.py (the benign-context-only family, NON_ATTACK_FAMILIES below) -- real UPnP/
     # SSDP local-device-discovery traffic must never count toward "N independent
     # attack sources," the same way it can't in evidence.py.
     "local_device_discovery": "local_context",
@@ -228,7 +218,7 @@ INDEPENDENCE_FAMILY_MAP: Dict[str, str] = {
     "markov_beaconing_surprise": "sequence_dynamics",
 }
 
-# Mirrors evidence.py's ATTACK_EVIDENCE_FAMILIES exclusion exactly -- decision/engine.py
+# The benign-context-only exclusion (formerly mirrored by evidence.py's second registry) -- decision/engine.py
 # excludes evidence in this family from independent-source counting toward an ATTACK
 # verdict (it's legitimate evidence for the LocalDeviceDiscoveryHypothesis benign
 # side, never for corroborating an attack). "novelty_context" (Phase 1a) gets the

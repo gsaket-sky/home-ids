@@ -1,0 +1,676 @@
+{
+ "attack": {
+  "claims": {
+   "T1110.001": "outbound password guessing is visible as login-port fan-out to many hosts; the ATT&CK analytics for T1110 are host-only",
+   "T1110.003": "password spraying shows the same login-port fan-out shape",
+   "T1486": "encryption for impact over SMB shows as a write burst to a NAS share",
+   "T1583.001": "a domain acquired for an operation shows as a young domain at first use (domain age context)",
+   "T1584": "a compromised gateway shows as rewritten DNS answers (router_dns_rewrite)",
+   "T1584.005": "a botnet shows as several local devices sharing a rare C2 entity"
+  },
+  "entries": {
+   "T1001.001": {
+    "phase": "P4",
+    "reason": "protocol metadata anomaly on conn/ssl facts (D3-PMAD)",
+    "status": "planned"
+   },
+   "T1001.002": {
+    "phase": "P4",
+    "reason": "protocol metadata anomaly (size/entropy shape) on conn facts",
+    "status": "planned"
+   },
+   "T1003.006": {
+    "reason": "Windows domain / Active Directory internals (domain controller replication, domain groups, group policy, domain credentials); the product's target networks have no domain controller",
+    "status": "out_of_scope"
+   },
+   "T1008": {
+    "phase": "P2",
+    "reason": "session linkage: a second C2 channel joining the same session (design B/L3)",
+    "status": "planned"
+   },
+   "T1011": {
+    "reason": "non-IP or radio medium (Bluetooth, Wi-Fi association) outside a wired sensor's view; a rogue access point is a stated limit (design P)",
+    "status": "not_observable"
+   },
+   "T1011.001": {
+    "reason": "non-IP or radio medium (Bluetooth, Wi-Fi association) outside a wired sensor's view; a rogue access point is a stated limit (design P)",
+    "status": "not_observable"
+   },
+   "T1016.001": {
+    "reason": "passive on the wire (no packets of its own) or indistinguishable from routine traffic by design (connectivity checks)",
+    "status": "not_observable"
+   },
+   "T1020.001": {
+    "phase": "P4",
+    "reason": "upload ledger on network-device roles: a steady copy of traffic leaving the router",
+    "status": "planned"
+   },
+   "T1021.001": {
+    "phase": "P4",
+    "reason": "remote terminal session detection (D3-RTSD): RDP from an unusual peer / role",
+    "status": "planned"
+   },
+   "T1021.003": {
+    "phase": "P4",
+    "reason": "DCOM/RPC lateral sessions (D3-RTA)",
+    "status": "planned"
+   },
+   "T1021.004": {
+    "phase": "P4",
+    "reason": "remote terminal session detection: SSH lateral from an unusual peer / role",
+    "status": "planned"
+   },
+   "T1021.005": {
+    "phase": "P4",
+    "reason": "remote terminal session detection: VNC",
+    "status": "planned"
+   },
+   "T1021.006": {
+    "phase": "P4",
+    "reason": "remote terminal session detection: WinRM",
+    "status": "planned"
+   },
+   "T1027": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1027.003": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1027.004": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1027.006": {
+    "reason": "payload content inside an (encrypted) session; the sensor sees the session, not what it carries -- the follow-on C2 / exfiltration is covered",
+    "status": "not_observable"
+   },
+   "T1027.008": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1027.012": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1027.013": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1027.017": {
+    "reason": "payload content inside an (encrypted) session; the sensor sees the session, not what it carries -- the follow-on C2 / exfiltration is covered",
+    "status": "not_observable"
+   },
+   "T1027.018": {
+    "reason": "payload content inside an (encrypted) session; the sensor sees the session, not what it carries -- the follow-on C2 / exfiltration is covered",
+    "status": "not_observable"
+   },
+   "T1036.012": {
+    "reason": "payload content inside an (encrypted) session; the sensor sees the session, not what it carries -- the follow-on C2 / exfiltration is covered",
+    "status": "not_observable"
+   },
+   "T1037.003": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1040": {
+    "reason": "passive on the wire (no packets of its own) or indistinguishable from routine traffic by design (connectivity checks)",
+    "status": "not_observable"
+   },
+   "T1047": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1049": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1053.007": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1056": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1056.001": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1056.003": {
+    "reason": "payload content inside an (encrypted) session; the sensor sees the session, not what it carries -- the follow-on C2 / exfiltration is covered",
+    "status": "not_observable"
+   },
+   "T1059.004": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1059.006": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1059.008": {
+    "reason": "network-device firmware / OS / configuration internals; visible only as changed device behaviour, which router_dns_rewrite and rogue_dhcp_server cover",
+    "status": "not_observable"
+   },
+   "T1069.002": {
+    "reason": "Windows domain / Active Directory internals (domain controller replication, domain groups, group policy, domain credentials); the product's target networks have no domain controller",
+    "status": "out_of_scope"
+   },
+   "T1070.005": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1070.007": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1071.002": {
+    "phase": "P1",
+    "reason": "service identification from conn.log `service` (design N5); FTP C2 to a single host",
+    "status": "planned"
+   },
+   "T1071.003": {
+    "phase": "P1",
+    "reason": "service identification (SMTP/IMAP from a non-mail device role)",
+    "status": "planned"
+   },
+   "T1071.005": {
+    "phase": "P1",
+    "reason": "service identification (MQTT/AMQP to an unknown broker)",
+    "status": "planned"
+   },
+   "T1072": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1078.002": {
+    "reason": "Windows domain / Active Directory internals (domain controller replication, domain groups, group policy, domain credentials); the product's target networks have no domain controller",
+    "status": "out_of_scope"
+   },
+   "T1087.002": {
+    "reason": "Windows domain / Active Directory internals (domain controller replication, domain groups, group policy, domain credentials); the product's target networks have no domain controller",
+    "status": "out_of_scope"
+   },
+   "T1095": {
+    "phase": "P1",
+    "reason": "conn.log protocol facts: ICMP / raw-protocol channels to one host",
+    "status": "planned"
+   },
+   "T1104": {
+    "phase": "P2",
+    "reason": "session linkage across channels and stages (design B, D)",
+    "status": "planned"
+   },
+   "T1105": {
+    "phase": "P4",
+    "reason": "download of an executable or script from a young / never-seen name (Zeek files facts + progression, design D)",
+    "status": "planned"
+   },
+   "T1114": {
+    "reason": "payload content inside an (encrypted) session; the sensor sees the session, not what it carries -- the follow-on C2 / exfiltration is covered",
+    "status": "not_observable"
+   },
+   "T1114.001": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1114.002": {
+    "reason": "cloud control-plane or cloud-account activity that never crosses the protected network",
+    "status": "out_of_scope"
+   },
+   "T1125": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1127": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1127.001": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1127.003": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1129": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1135": {
+    "phase": "P4",
+    "reason": "SMB share enumeration observations",
+    "status": "planned"
+   },
+   "T1176": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1176.001": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1176.002": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1185": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1187": {
+    "reason": "Windows domain / Active Directory internals (domain controller replication, domain groups, group policy, domain credentials); the product's target networks have no domain controller",
+    "status": "out_of_scope"
+   },
+   "T1189": {
+    "phase": "P4",
+    "reason": "progression: first contact with a young name, then C2 in the same session (design D)",
+    "status": "planned"
+   },
+   "T1195": {
+    "reason": "payload content inside an (encrypted) session; the sensor sees the session, not what it carries -- the follow-on C2 / exfiltration is covered",
+    "status": "not_observable"
+   },
+   "T1195.001": {
+    "reason": "payload content inside an (encrypted) session; the sensor sees the session, not what it carries -- the follow-on C2 / exfiltration is covered",
+    "status": "not_observable"
+   },
+   "T1195.002": {
+    "reason": "payload content inside an (encrypted) session; the sensor sees the session, not what it carries -- the follow-on C2 / exfiltration is covered",
+    "status": "not_observable"
+   },
+   "T1197": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1199": {
+    "reason": "payload content inside an (encrypted) session; the sensor sees the session, not what it carries -- the follow-on C2 / exfiltration is covered",
+    "status": "not_observable"
+   },
+   "T1202": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1203": {
+    "phase": "P4",
+    "reason": "progression: client exploit delivery followed by C2 (design D)",
+    "status": "planned"
+   },
+   "T1204": {
+    "phase": "P4",
+    "reason": "progression: user-triggered download followed by C2 (design D)",
+    "status": "planned"
+   },
+   "T1204.001": {
+    "phase": "P4",
+    "reason": "progression: link to a young name, then C2 (design D)",
+    "status": "planned"
+   },
+   "T1204.003": {
+    "phase": "P4",
+    "reason": "progression: container image pull from an unknown registry, then C2",
+    "status": "planned"
+   },
+   "T1204.004": {
+    "phase": "P4",
+    "reason": "progression: download right after a paste-and-run, then C2",
+    "status": "planned"
+   },
+   "T1204.005": {
+    "phase": "P4",
+    "reason": "progression: package fetch from an unknown index, then C2",
+    "status": "planned"
+   },
+   "T1205": {
+    "phase": "P4",
+    "reason": "connection-attempt sequences to closed ports followed by a session (D3-CAA)",
+    "status": "planned"
+   },
+   "T1205.001": {
+    "phase": "P4",
+    "reason": "port-knock sequence followed by an inbound session",
+    "status": "planned"
+   },
+   "T1205.002": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1207": {
+    "reason": "Windows domain / Active Directory internals (domain controller replication, domain groups, group policy, domain credentials); the product's target networks have no domain controller",
+    "status": "out_of_scope"
+   },
+   "T1213": {
+    "reason": "payload content inside an (encrypted) session; the sensor sees the session, not what it carries -- the follow-on C2 / exfiltration is covered",
+    "status": "not_observable"
+   },
+   "T1213.001": {
+    "reason": "payload content inside an (encrypted) session; the sensor sees the session, not what it carries -- the follow-on C2 / exfiltration is covered",
+    "status": "not_observable"
+   },
+   "T1213.006": {
+    "reason": "payload content inside an (encrypted) session; the sensor sees the session, not what it carries -- the follow-on C2 / exfiltration is covered",
+    "status": "not_observable"
+   },
+   "T1216.001": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1218": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1218.001": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1218.003": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1218.005": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1218.007": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1218.008": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1218.009": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1218.010": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1218.011": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1218.012": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1218.013": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1218.014": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1218.015": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1219": {
+    "phase": "P4",
+    "reason": "remote access tool sessions to relay services (D3-RTSD, relay pattern)",
+    "status": "planned"
+   },
+   "T1219.002": {
+    "phase": "P4",
+    "reason": "remote desktop software sessions to relay services",
+    "status": "planned"
+   },
+   "T1221": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1480": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1480.001": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1491.002": {
+    "phase": "P4",
+    "reason": "the defaced service is host-side; its inbound exposure is upnp_port_mapping_exposure",
+    "status": "planned"
+   },
+   "T1495": {
+    "reason": "network-device firmware / OS / configuration internals; visible only as changed device behaviour, which router_dns_rewrite and rogue_dhcp_server cover",
+    "status": "not_observable"
+   },
+   "T1530": {
+    "reason": "cloud control-plane or cloud-account activity that never crosses the protected network",
+    "status": "out_of_scope"
+   },
+   "T1534": {
+    "reason": "payload content inside an (encrypted) session; the sensor sees the session, not what it carries -- the follow-on C2 / exfiltration is covered",
+    "status": "not_observable"
+   },
+   "T1535": {
+    "reason": "cloud control-plane or cloud-account activity that never crosses the protected network",
+    "status": "out_of_scope"
+   },
+   "T1542.004": {
+    "reason": "network-device firmware / OS / configuration internals; visible only as changed device behaviour, which router_dns_rewrite and rogue_dhcp_server cover",
+    "status": "not_observable"
+   },
+   "T1542.005": {
+    "reason": "network-device firmware / OS / configuration internals; visible only as changed device behaviour, which router_dns_rewrite and rogue_dhcp_server cover",
+    "status": "not_observable"
+   },
+   "T1546": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1546.004": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1546.018": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1550.002": {
+    "reason": "Windows domain / Active Directory internals (domain controller replication, domain groups, group policy, domain credentials); the product's target networks have no domain controller",
+    "status": "out_of_scope"
+   },
+   "T1552": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1552.001": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1552.004": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1552.005": {
+    "reason": "cloud control-plane or cloud-account activity that never crosses the protected network",
+    "status": "out_of_scope"
+   },
+   "T1552.006": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1557.004": {
+    "reason": "non-IP or radio medium (Bluetooth, Wi-Fi association) outside a wired sensor's view; a rogue access point is a stated limit (design P)",
+    "status": "not_observable"
+   },
+   "T1563": {
+    "phase": "P4",
+    "reason": "session hijack shape: a second peer taking over an established remote session",
+    "status": "planned"
+   },
+   "T1563.001": {
+    "phase": "P4",
+    "reason": "SSH session hijack shape",
+    "status": "planned"
+   },
+   "T1563.002": {
+    "phase": "P4",
+    "reason": "RDP session hijack shape",
+    "status": "planned"
+   },
+   "T1566.001": {
+    "phase": "P4",
+    "reason": "progression: mail-delivered payload, then C2 (design D)",
+    "status": "planned"
+   },
+   "T1566.002": {
+    "phase": "P4",
+    "reason": "progression: link to a young name, then C2 (design D)",
+    "status": "planned"
+   },
+   "T1566.003": {
+    "phase": "P4",
+    "reason": "progression: message-service link, then C2 (design D)",
+    "status": "planned"
+   },
+   "T1568.003": {
+    "phase": "P4",
+    "reason": "per-device answer-to-connection mapping: connections to addresses computed from answers",
+    "status": "planned"
+   },
+   "T1569.002": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1571": {
+    "phase": "P1",
+    "reason": "service-vs-port facts per connection (design L observations)",
+    "status": "planned"
+   },
+   "T1585": {
+    "reason": "adversary activity outside the protected network (accounts, infrastructure, reconnaissance of public sources)",
+    "status": "not_observable"
+   },
+   "T1585.001": {
+    "reason": "adversary activity outside the protected network (accounts, infrastructure, reconnaissance of public sources)",
+    "status": "not_observable"
+   },
+   "T1586": {
+    "reason": "adversary activity outside the protected network (accounts, infrastructure, reconnaissance of public sources)",
+    "status": "not_observable"
+   },
+   "T1586.001": {
+    "reason": "adversary activity outside the protected network (accounts, infrastructure, reconnaissance of public sources)",
+    "status": "not_observable"
+   },
+   "T1589": {
+    "reason": "adversary activity outside the protected network (accounts, infrastructure, reconnaissance of public sources)",
+    "status": "not_observable"
+   },
+   "T1589.002": {
+    "reason": "adversary activity outside the protected network (accounts, infrastructure, reconnaissance of public sources)",
+    "status": "not_observable"
+   },
+   "T1595.002": {
+    "phase": "P4",
+    "reason": "inbound-initiated scanning flows (design P inbound exposure)",
+    "status": "planned"
+   },
+   "T1595.003": {
+    "phase": "P4",
+    "reason": "inbound wordlist probing of an exposed service",
+    "status": "planned"
+   },
+   "T1598": {
+    "phase": "P4",
+    "reason": "credential-harvest page on a young name (domain age + first contact + form post shape)",
+    "status": "planned"
+   },
+   "T1598.001": {
+    "phase": "P4",
+    "reason": "as T1598 via a messaging service",
+    "status": "planned"
+   },
+   "T1598.002": {
+    "phase": "P4",
+    "reason": "as T1598 via an attachment that calls home",
+    "status": "planned"
+   },
+   "T1598.003": {
+    "phase": "P4",
+    "reason": "as T1598 via a link to a young name",
+    "status": "planned"
+   },
+   "T1600": {
+    "reason": "network-device firmware / OS / configuration internals; visible only as changed device behaviour, which router_dns_rewrite and rogue_dhcp_server cover",
+    "status": "not_observable"
+   },
+   "T1600.001": {
+    "reason": "network-device firmware / OS / configuration internals; visible only as changed device behaviour, which router_dns_rewrite and rogue_dhcp_server cover",
+    "status": "not_observable"
+   },
+   "T1600.002": {
+    "reason": "network-device firmware / OS / configuration internals; visible only as changed device behaviour, which router_dns_rewrite and rogue_dhcp_server cover",
+    "status": "not_observable"
+   },
+   "T1602": {
+    "phase": "P4",
+    "reason": "SNMP / config-protocol requests to network devices from a non-admin device",
+    "status": "planned"
+   },
+   "T1602.001": {
+    "phase": "P4",
+    "reason": "SNMP walk from a non-admin device",
+    "status": "planned"
+   },
+   "T1602.002": {
+    "phase": "P4",
+    "reason": "TFTP/HTTP config download from a network device by a non-admin device",
+    "status": "planned"
+   },
+   "T1606": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1606.001": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1610": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1612": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1614": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1615": {
+    "reason": "Windows domain / Active Directory internals (domain controller replication, domain groups, group policy, domain credentials); the product's target networks have no domain controller",
+    "status": "out_of_scope"
+   },
+   "T1669": {
+    "reason": "non-IP or radio medium (Bluetooth, Wi-Fi association) outside a wired sensor's view; a rogue access point is a stated limit (design P)",
+    "status": "not_observable"
+   },
+   "T1684": {
+    "reason": "payload content inside an (encrypted) session; the sensor sees the session, not what it carries -- the follow-on C2 / exfiltration is covered",
+    "status": "not_observable"
+   },
+   "T1686.002": {
+    "reason": "network-device firmware / OS / configuration internals; visible only as changed device behaviour, which router_dns_rewrite and rogue_dhcp_server cover",
+    "status": "not_observable"
+   },
+   "T1686.003": {
+    "reason": "host-internal behaviour (process, file, registry, script, module); a passive network sensor sees at most the traffic that follows, which the C2 / exfiltration / ingress scenarios cover",
+    "status": "not_observable"
+   },
+   "T1687": {
+    "reason": "network-device firmware / OS / configuration internals; visible only as changed device behaviour, which router_dns_rewrite and rogue_dhcp_server cover",
+    "status": "not_observable"
+   }
+  },
+  "rule": "covered = an active scenario references the technique; planned = a pending scenario references it or it has a planned entry here (phase + what it needs); a parent technique takes the best status of its sub-techniques; every other in-scope technique needs an entry here: not_observable or out_of_scope, with a reason"
+ }
+}

@@ -75,10 +75,10 @@ print("--- Section A: mitigation/ips.py's existing tarpit subsystem ---")
 check("a real Layer-2 dual-stack (ARP+NDP) tarpit worker exists, not a stub",
       "def _arp_tarpit_loop(self)" in _ips_src and "def _ndp_tarpit_loop(self)" in _ips_src)
 
-check("tarpit activation is decision-driven (risk_score>=9.0 or lateral_threat), in "
+check("tarpit activation is decision-driven (the containment gate's authorisation + risk_score>=9.0), in "
       "the same real-time path as router isolation -- not a separate, disconnected "
-      "mechanism",
-      "risk_score >= 9.0 or lateral_threat" in _ips_src)
+      "mechanism (U1, 2026-10-14: the window-count `lateral_threat` bypass is gone)",
+      "and risk_score >= 9.0:" in _ips_src and "isolation_action = device_isolation_action(" in _ips_src)
 
 check("release_device() already exists and releases tarpit targets specifically "
       "(not just router isolation/Pi-hole)",

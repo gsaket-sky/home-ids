@@ -47,7 +47,10 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+import dataclasses
+from dataclasses import dataclass, fields
+from types import MappingProxyType
+from typing import Any, Dict, List, Mapping, NamedTuple, Optional, Tuple
 
 from argus.autotune.engine import AutotuneEngine
 from argus.baseline.engine import BaselineEngine
@@ -203,7 +206,7 @@ def _get_graph_store() -> GraphStore:
 
 # Restart-cadence investigation follow-up (2026-09-28, open item #1 of
 # Documentation/MEMORY_RESTART_ROOT_CAUSE_AND_CAPACITY_PLAN.md): device_type ->
-# [device_ids], the same shape _inject_peer_deviation_evidence() below used to
+# [device_ids], the same shape _gather_peer_stats() below used to
 # ask GraphStore.get_devices_with_metadata_value() to recompute via a full
 # `devices` table scan EVERY call -- one scan per device evaluated per cycle,
 # for a cycle that visits every device. Cached here instead, TTL-refreshed
@@ -234,7 +237,7 @@ def _refresh_peer_cohort_cache_if_stale(now: float) -> None:
 def _record_own_device_type_in_cache(device_id: str, device_type: str) -> None:
     """Keeps the cache in sync with the one write path that can change a
     device's device_type (the update_device_metadata() call in
-    _inject_peer_deviation_evidence() immediately above this function's own
+    _gather_peer_stats() immediately above this function's own
     call site), without waiting for the next periodic rebuild."""
     for existing_type, ids in _peer_cohort_cache.items():
         if existing_type != device_type and device_id in ids:
@@ -368,33 +371,25 @@ def _get_baseline_engine() -> BaselineEngine:
     return _baseline_engine
 
 
-def _tuned_rep_vector(rep_vector, device_id: Optional[str], autotune: AutotuneEngine):
-    """Re-classifies `rep_vector` using the SAME raw inputs it was already
-    built from (vt/ti/abuse scores, asn_owner -- all already on the
-    ReputationVector dataclass), but with reputation_tier_suspicious_floor/
-    reputation_tier_high_floor read live from the autotuner -- inert by
-    construction (classify()'s own defaults, 2.0/4.0, match the original
-    hardcoded values exactly) until a real promotion exists for this device.
-
-    Deliberately does NOT touch core/pipeline.py's own `rep_vector` (the
-    object this function returns a NEW instance built from, never mutated)
-    -- pipeline.py's own alert text keeps reading
-    the untouched original, so this only ever affects argus's OWN decision
-    call a few lines below. See classifier.py's own classify() docstring for
-    why this reclassify-in-the-caller approach was chosen over editing
-    pipeline.py's shared classify() call site directly."""
+def _tuned_rep_vector(rep_vector, params: "DecisionParameters"):
+    """Re-classifies `rep_vector` from the SAME raw inputs it was built from (vt/ti/abuse scores, asn_owner -- all on
+    the ReputationVector) with the two reputation floors in `params` -- pure: no autotuner read, no state. Both floors
+    None (no device scope, the pre-autotune contract) returns `rep_vector` unchanged; one given and the other None uses
+    classify()'s own default (2.0 / 4.0) for the missing one. Never mutates `rep_vector`: pipeline.py's alert text
+    keeps reading the untouched original."""
     if rep_vector is None:
         return rep_vector
-    suspicious_floor = autotune.get_active_value(
-        "reputation_tier_suspicious_floor", device_id, default=2.0)
-    high_floor = autotune.get_active_value(
-        "reputation_tier_high_floor", device_id, default=4.0)
+    if params.reputation_tier_suspicious_floor is None and params.reputation_tier_high_floor is None:
+        return rep_vector
+    suspicious_floor = params.reputation_tier_suspicious_floor
+    high_floor = params.reputation_tier_high_floor
     return _reputation_classifier.classify(
         rep_vector.domain, vt_score=rep_vector.vt_detection_ratio,
         afpe_score=rep_vector.cl_afpe_similarity, is_new=rep_vector.first_seen,
         ti_score=rep_vector.ti_risk, abuse_score=rep_vector.abuse_risk,
         asn_owner=rep_vector.asn_owner,
-        confirmed_vt_ti_floor=suspicious_floor, confirmed_abuse_floor=high_floor,
+        confirmed_vt_ti_floor=2.0 if suspicious_floor is None else suspicious_floor,
+        confirmed_abuse_floor=4.0 if high_floor is None else high_floor,
     )
 
 
@@ -505,7 +500,7 @@ def _write_graph(device_id: str, timestamp: float, fresh_v2: List, merged_v2: Li
                     store.insert_evidence(ev)
                 if decision_changed:
                     # Phase 1a: merged_v2 also carries synthetic, graph-DERIVED evidence
-                    # (_inject_graph_derived_evidence()) that is deliberately never passed
+                    # (_gather_graph_derived()) that is deliberately never passed
                     # to insert_evidence() above -- an evidence->decision 'supports' edge
                     # for an evidence_id that was never actually persisted would be a
                     # dangling reference. All three synthetic evidence types share the
@@ -574,16 +569,11 @@ def _write_graph(device_id: str, timestamp: float, fresh_v2: List, merged_v2: Li
 def write_supplementary_decision(device_id: str, timestamp: float, new_evidence_v1: List,
                                    decision: Dict[str, Any]) -> Optional[str]:
     """For a decision computed OUTSIDE the main per-cycle evaluate() call above --
-    currently only pipeline.py's geofencing hard-stop re-evaluation, which
-    deliberately calls evaluate() WITHOUT device_id (see that call site's own
-    2026-08-27 comment) to avoid re-running evaluate()'s device_id-gated graph
-    injections a second time this cycle. Re-running those was never actually safe
-    to fix by just passing device_id: _inject_baseline_evidence() calls
-    BaselineEngine.score_metric(), which MUTATES the device's persistent Bayesian/
-    BOCPD posteriors on every call -- a second call in the same cycle would
-    double-count that cycle's own observation into the baseline model. This
-    function instead does ONLY the plain graph write (new evidence + one decision
-    row + hypothesis edges), with none of evaluate()'s read/injection side effects.
+    currently only pipeline.py's geofencing hard-stop re-decision (redecide_with_evidence(),
+    the pure decide() on the cycle's own gathered facts: it gathers nothing and writes
+    nothing, so a second evaluate() -- whose baseline learners would have observed the
+    cycle twice -- is never needed). This function does ONLY the plain graph write (new
+    evidence + one decision row + hypothesis edges).
 
     Found live 2026-09-22: a real geofencing HIGH alert (document-server/device-hash,
     Russia-blocklisted destination) fired correctly to Telegram but was completely
@@ -691,10 +681,15 @@ def _is_lan_destination(dest: str) -> bool:
     return any(ip.version == n.version and ip in n for n in _LAN_NETWORKS)
 
 
-def _inject_graph_derived_evidence(device_id: str, destinations: set, ts: float,
-                                      fresh_evidence: Optional[List[Evidence]] = None,
-                                      geoip_engine=None) -> List[Evidence]:
-    """computes the three new graph-only-possible
+def _gather_graph_derived(device_id: str, destinations: set, ts: float,
+                          fresh_evidence: Optional[List[Evidence]] = None,
+                          geoip_engine=None) -> List[Any]:
+    """GATHER stage (U7, 2026-10-14): the graph reads behind the derived signals below, done once per cycle. Returns
+    Evidence items plus `_ReputationCandidate` placeholders, in scoring order; a placeholder becomes `reputation`
+    evidence in decide() only when within `reputation_propagation_ttl_seconds` (a decide-stage parameter, so a shadow
+    evaluates a candidate TTL on the same facts without a second graph read).
+
+    computes the three new graph-only-possible
     signals for THIS cycle's decision -- cross-device correlation, reputation
     propagation, and genuine first-contact scoring (see graph/window.py's
     devices_targeting()/domain_seen_before() and graph/store.py's
@@ -771,20 +766,9 @@ def _inject_graph_derived_evidence(device_id: str, destinations: set, ts: float,
                 ))
 
             rep = store.get_destination_reputation(dest)
-            # 2026-09-27 (Phase 4 of the autonomy-completion effort): resolved per
-            # device, same pattern as every other tunable this module reads --
-            # inert by construction until a real promotion exists (default matches
-            # the untouched original hardcoded value exactly).
-            propagation_ttl = _get_autotune_engine().get_active_value(
-                "reputation_propagation_ttl_seconds", device_id, default=_REPUTATION_PROPAGATION_TTL_SECONDS)
-            if (rep and rep["tier"] >= _REPUTATION_PROPAGATION_MIN_TIER
-                    and (ts - rep["cached_at"]) <= propagation_ttl):
-                synthetic.append(Evidence(
-                    device_id=device_id, destination_id=dest, evidence_type="reputation",
-                    independence_family="reputation", timestamp=ts,
-                    source="v13_live_engine", confidence=1.0, value=float(rep["tier"]),
-                    provenance="v13_live_engine:reputation_propagation",
-                ))
+            # The propagation TTL (reputation_propagation_ttl_seconds) is applied in decide(), see the docstring.
+            if rep and rep["tier"] >= _REPUTATION_PROPAGATION_MIN_TIER:
+                synthetic.append(_ReputationCandidate(dest, float(rep["tier"]), float(rep["cached_at"])))
 
             if not window.domain_seen_before(
                 device_id, dest, _FIRST_CONTACT_LOOKBACK_SECONDS, now=ts,
@@ -900,7 +884,7 @@ def _cached_distinct_destination_count(store, device_id: str, ts: float) -> int:
     return count
 
 
-def _inject_peer_deviation_evidence(device_id: str, device_type: str, ts: float) -> List[Evidence]:
+def _gather_peer_stats(device_id: str, device_type: str, ts: float) -> Optional["PeerStats"]:
     """Release 14, net-new capability N2: "does this device deviate from
     similar devices" -- groups devices by device_type (already computed by
     core/identity.py and pipeline.py, passed straight through here) and
@@ -937,8 +921,11 @@ def _inject_peer_deviation_evidence(device_id: str, device_type: str, ts: float)
     unidentified device at HIGH with zero real evidence behind it. "unknown" means
     exactly the same thing an empty device_type does here -- no real classification
     to compare against -- so it gets the same treatment."""
+    # GATHER stage (U7, 2026-10-14): only the counts are gathered here; the two thresholds
+    # (peer_deviation_min_absolute_count / peer_deviation_multiplier) are applied in decide() by
+    # _peer_deviation_evidence(), so a shadow evaluates a candidate threshold on the same counts.
     if not device_type or device_type == "unknown":
-        return []
+        return None
     try:
         store = _get_graph_store()
         store.update_device_metadata(device_id, {"device_type": device_type}, timestamp=ts)
@@ -946,56 +933,38 @@ def _inject_peer_deviation_evidence(device_id: str, device_type: str, ts: float)
         _record_own_device_type_in_cache(device_id, device_type)
         peers = [d for d in _peer_cohort_cache.get(device_type, []) if d != device_id]
         if len(peers) < _PEER_DEVIATION_MIN_PEERS:
-            return []
+            return None
         my_count = _cached_distinct_destination_count(store, device_id, ts)
-        # 2026-09-27 (Phase 3 of the autonomy-completion effort): both constants below
-        # are now allowlisted, device/category/global-scoped tunables -- resolved here
-        # (not hardcoded) so a promoted override actually changes this evidence-creation
-        # gate, not just something that reads inert. Defaults match the untouched
-        # original hardcoded values exactly, so this is inert-by-construction until a
-        # real promotion exists for this device, same pattern as every other tunable
-        # this module already resolves.
-        autotune = _get_autotune_engine()
-        min_absolute_count = autotune.get_active_value(
-            "peer_deviation_min_absolute_count", device_id, default=_PEER_DEVIATION_MIN_ABSOLUTE_COUNT)
-        multiplier = autotune.get_active_value(
-            "peer_deviation_multiplier", device_id, default=_PEER_DEVIATION_MULTIPLIER)
-        if my_count < min_absolute_count:
-            return []
         peer_counts = [_cached_distinct_destination_count(store, p, ts) for p in peers]
-        peer_avg = sum(peer_counts) / len(peer_counts)
-        if peer_avg > 0 and my_count >= peer_avg * multiplier:
-            return [Evidence(
-                device_id=device_id, destination_id=NO_DESTINATION, evidence_type="peer_deviation",
-                independence_family="peer_cohort_deviation", timestamp=ts,
-                source="v13_live_engine", confidence=0.6, value=float(my_count),
-                provenance=f"v13_live_engine:peer_deviation:{device_type}",
-                features={"device_type": device_type, "my_count": my_count,
-                          "peer_avg": round(peer_avg, 1), "peer_count": len(peers),
-                          "multiplier": multiplier, "min_absolute_count": min_absolute_count},
-            )]
+        return PeerStats(device_type=device_type, my_count=my_count,
+                         peer_avg=sum(peer_counts) / len(peer_counts), peer_count=len(peers))
     except Exception as e:
         LOGGER.warning(
             "Failed to compute peer-cohort deviation for device %r (type=%r), deciding "
             "without it this cycle: %s", device_id, device_type, e,
         )
+    return None
+
+
+def _peer_deviation_evidence(device_id: str, stats: Optional["PeerStats"], params: "DecisionParameters",
+                             ts: float) -> List[Evidence]:
+    """DECIDE stage, pure: the peer-deviation evidence for gathered `stats` under `params`."""
+    if stats is None or stats.my_count < params.peer_deviation_min_absolute_count:
+        return []
+    if stats.peer_avg > 0 and stats.my_count >= stats.peer_avg * params.peer_deviation_multiplier:
+        return [Evidence(
+            device_id=device_id, destination_id=NO_DESTINATION, evidence_type="peer_deviation",
+            independence_family="peer_cohort_deviation", timestamp=ts,
+            source="v13_live_engine", confidence=0.6, value=float(stats.my_count),
+            provenance=f"v13_live_engine:peer_deviation:{stats.device_type}",
+            features={"device_type": stats.device_type, "my_count": stats.my_count,
+                      "peer_avg": round(stats.peer_avg, 1), "peer_count": stats.peer_count,
+                      "multiplier": params.peer_deviation_multiplier,
+                      "min_absolute_count": params.peer_deviation_min_absolute_count},
+        )]
     return []
 
 
-# Release 15 Sheet 00, live wiring (2026-09-16, user request: "implement Bayesian
-# Gaussian/Beta/Poisson/Markov + BOCPD changepoint-detection subsystem in .94, ignore
-# .19"): argus/baseline/engine.py's BaselineEngine has been real, tested code since
-# Sheet 00 shipped -- but its only real caller was argus/ingest/daemon.py, the
-# separate, out-of-scope `.19` shadow host (confirmed by grep before this change:
-# zero references from live_engine.py/pipeline.py). This ports daemon.py's own
-# _score_baselines() call sequence -- same metric -> model_kind mapping, same
-# one-cycle-lagged `risk` Gaussian input, same activity-transition scoring from this
-# cycle's own fresh evidence types -- into the live per-cycle path, rather than
-# reinventing it. `.94`'s real `features` dict already carries every raw input this
-# needs (query_rate/entropy_avg/unique_domains/nxdomain_ratio/blocked_ratio/total/
-# zeek_outbound_bytes all confirmed present in a real .94 alert's features dict, since
-# pipeline.py already merges DNS + Zeek features into one dict before calling
-# evaluate()) -- no new feature extraction required, only the scoring call sequence.
 _GAUSSIAN_INPUT_KEYS = {
     "query_rate": "query_rate", "entropy_avg": "entropy_avg", "unique_domains": "unique_domains",
     "outbound_bytes": "zeek_outbound_bytes",
@@ -1132,6 +1101,270 @@ def _inject_baseline_evidence(device_id: str, features: dict, fresh_v2: List, ts
         return []
 
 
+# --- gather / decide / commit (U7, 2026-10-14; DETECTION_CORE_REWORK section I) -------------------------------------
+#
+# One cycle is three stages. GATHER (impure, exactly once per cycle): converts the detector evidence, reads the graph
+# window and the facts behind the derived signals, and runs the stateful learners (BOCPD baselines, Markov activity
+# model) -- they observe each cycle once, with the champion parameters. DECIDE (pure): turns the gathered facts plus a
+# DecisionParameters value into a decision -- no graph access, no autotuner read, no module state; the same gathered
+# cycle decided twice with the same parameters gives the same decision. COMMIT (impure): graph writes and the
+# per-device bookkeeping (_last_risk_score, _last_decision_key/_id). A shadow evaluation of an autotune candidate is
+# decide() on the real cycle's GatheredCycle with one parameter replaced: it cannot touch the learners, the graph or
+# the bookkeeping. Before, the shadow re-ran the whole evaluate() and rolled the graph back, which left the in-memory
+# learners having observed the cycle again and the bookkeeping pointing at rolled-back rows.
+
+
+class _ReputationCandidate(NamedTuple):
+    """A cached high-tier reputation for one of this cycle's destinations; becomes `reputation` evidence in decide()
+    when `ts - cached_at <= reputation_propagation_ttl_seconds`."""
+    destination: str
+    tier: float
+    cached_at: float
+
+
+class PeerStats(NamedTuple):
+    device_type: str
+    my_count: int
+    peer_avg: float
+    peer_count: int
+
+
+@dataclass(frozen=True)
+class DecisionParameters:
+    """Every tunable value decide() reads. Floors None = the reputation vector is used as classified (no device
+    scope: the contract for calls without a device_id). `resolved` is True when the values came from the autotuner
+    for a device; only then are they recorded on the decision as `_autotune_state`."""
+    reputation_tier_suspicious_floor: Optional[float] = None
+    reputation_tier_high_floor: Optional[float] = None
+    hard_stop_candidate_sensitivity: Optional[float] = None
+    familiarity_trust_bar: float = 0.6       # DeviceProfileBenignHypothesis's own default
+    reputation_propagation_ttl_seconds: float = float(_REPUTATION_PROPAGATION_TTL_SECONDS)
+    peer_deviation_multiplier: float = _PEER_DEVIATION_MULTIPLIER
+    peer_deviation_min_absolute_count: float = float(_PEER_DEVIATION_MIN_ABSOLUTE_COUNT)
+    resolved: bool = False
+
+
+# The autotune parameters decide() reads -- the ones a per-cycle shadow can evaluate. Every other tunable acts in a
+# stateful learner (bocpd_hazard_rate, pool_*), a detector (arp_sweep_unique_targets_threshold) or the false-positive
+# engine (fp_combined_suppress_threshold, combined_uncertain_threshold, trust_cache_ttl_seconds); re-deciding a cycle
+# says nothing about them (their old shadow rows were trivially "agree"), so the shadow records nothing for them.
+DECIDE_PARAMETERS = frozenset(f.name for f in fields(DecisionParameters) if f.name != "resolved")
+
+# What resolve_decision_parameters() returns for a device with no promoted autotune change (the champion before any
+# tuning). The golden guard (argus/golden/guard.py) decides its cases with these values.
+CHAMPION_DEFAULTS = DecisionParameters(
+    reputation_tier_suspicious_floor=2.0, reputation_tier_high_floor=4.0, hard_stop_candidate_sensitivity=None,
+    familiarity_trust_bar=0.6, reputation_propagation_ttl_seconds=float(_REPUTATION_PROPAGATION_TTL_SECONDS),
+    peer_deviation_multiplier=_PEER_DEVIATION_MULTIPLIER,
+    peer_deviation_min_absolute_count=float(_PEER_DEVIATION_MIN_ABSOLUTE_COUNT), resolved=True,
+)
+
+
+@dataclass(frozen=True)
+class GatheredCycle:
+    """Everything decide() needs for one device cycle, read once. Immutable: `features` is a read-only copy (the
+    pipeline's dict is shared and mutated by later consumers), the evidence collections are tuples."""
+    device_id: Optional[str]
+    ts: float
+    device_type: str
+    is_safe: bool
+    baseline_familiarity: float
+    features: Optional[Mapping[str, Any]]
+    rep_vector: Any
+    fresh_v2: Tuple[Evidence, ...]
+    windowed_v2: Tuple[Evidence, ...] = ()
+    graph_derived: Tuple[Any, ...] = ()           # Evidence and _ReputationCandidate, in scoring order
+    peer_stats: Optional[PeerStats] = None
+    baseline_v2: Tuple[Evidence, ...] = ()
+    domain_age_v2: Tuple[Evidence, ...] = ()
+    # which evidence sources were available when this cycle was gathered ({source: ok|degraded|unavailable|disabled},
+    # core/source_availability.py); recorded on the decision as `_sources`. Empty = not recorded (callers without a registry).
+    sources: Mapping[str, str] = MappingProxyType({})
+
+
+class EvaluatedCycle(NamedTuple):
+    """A decided cycle: its gathered facts and the champion parameters the real decision used -- what a shadow
+    evaluation re-decides with one parameter replaced."""
+    gathered: GatheredCycle
+    params: DecisionParameters
+
+
+def resolve_decision_parameters(device_id: Optional[str]) -> DecisionParameters:
+    """The champion parameters for `device_id` (device -> device_type -> global, AutotuneEngine.get_active_value()).
+    No device id: the defaults (no autotuner read, rep vector untouched). A failing autotuner read degrades to the
+    defaults for this cycle, logged -- never blocks the decision."""
+    if not device_id:
+        return DecisionParameters()
+    try:
+        autotune = _get_autotune_engine()
+        return DecisionParameters(
+            **{name: autotune.get_active_value(name, device_id, default=getattr(CHAMPION_DEFAULTS, name))
+               for name in sorted(DECIDE_PARAMETERS)},
+            resolved=True,
+        )
+    except Exception as e:
+        LOGGER.warning(
+            "Failed to resolve live-tunable autotuner parameters for device %r, "
+            "deciding with defaults this cycle: %s", device_id, e,
+        )
+        return DecisionParameters()
+
+
+def gather_cycle(active_evidence_v1: List, rep_vector, device_type: str = "", baseline_familiarity: float = 0.0,
+                 features: Optional[dict] = None, is_safe: bool = False, device_id: Optional[str] = None,
+                 now: Optional[float] = None, geoip_engine=None,
+                 sources: Optional[Mapping[str, str]] = None) -> GatheredCycle:
+    """GATHER: the impure half of a cycle, run exactly once (see the stage comment above). Each graph read and learner
+    degrades to "nothing from it this cycle" on its own; only an unexpected programming error raises."""
+    fresh_v2 = _convert_active_evidence(active_evidence_v1, features or {})
+    ts = now if now is not None else time.time()
+    frozen_features = MappingProxyType(dict(features)) if features is not None else None
+    frozen_sources = MappingProxyType(dict(sources or {}))
+    if not device_id:
+        return GatheredCycle(device_id=None, ts=ts, device_type=device_type, is_safe=is_safe,
+                             baseline_familiarity=baseline_familiarity, features=frozen_features,
+                             rep_vector=rep_vector, fresh_v2=tuple(fresh_v2), sources=frozen_sources)
+    windowed_v2 = _query_graph_window(device_id, ts)
+    # Phase 1a: cross-device correlation / reputation propagation / first contact -- from THIS cycle's destinations
+    # only; scoring context, never written to the graph (see _gather_graph_derived()).
+    fresh_destinations = {ev.destination_id for ev in fresh_v2}
+    graph_derived = _gather_graph_derived(device_id, fresh_destinations, ts, fresh_v2, geoip_engine=geoip_engine)
+    # Release 14, N2: peer-cohort deviation (see _gather_peer_stats()).
+    peer_stats = _gather_peer_stats(device_id, device_type, ts)
+    # Release 15 Sheet 00: Bayesian Gaussian/Beta/Poisson/Markov + BOCPD -- the stateful learners observe this cycle
+    # here, once (see _inject_baseline_evidence()).
+    baseline_v2 = _inject_baseline_evidence(device_id, features or {}, fresh_v2, ts)
+    # Domain age (opt-in): supporting context only -- see _inject_domain_age_evidence().
+    domain_age_v2 = _inject_domain_age_evidence(device_id, fresh_v2, ts)
+    return GatheredCycle(device_id=device_id, ts=ts, device_type=device_type, is_safe=is_safe,
+                         baseline_familiarity=baseline_familiarity, features=frozen_features, rep_vector=rep_vector,
+                         fresh_v2=tuple(fresh_v2), windowed_v2=tuple(windowed_v2),
+                         graph_derived=tuple(graph_derived), peer_stats=peer_stats,
+                         baseline_v2=tuple(baseline_v2), domain_age_v2=tuple(domain_age_v2), sources=frozen_sources)
+
+
+def _autotune_state(gathered: GatheredCycle, params: DecisionParameters) -> Dict[str, Any]:
+    """Autonomous-behaviour traceability (Documentation/ALERT_TRACE_GRAPH_PLAN.md, 2026-09-22): the tunable values this
+    decision used, persisted onto the matching alert_event's autotune_state_json by pipeline.py. Values only (not
+    which threshold_history.change_id produced each). Includes the raw inputs judged against the bars (familiarity
+    score, reputation scores) so a retroactive calibration can tell whether another value would have changed it."""
+    if not params.resolved:
+        return {}
+    state: Dict[str, Any] = {
+        "hard_stop_candidate_sensitivity": params.hard_stop_candidate_sensitivity,
+        "reputation_tier_suspicious_floor": params.reputation_tier_suspicious_floor,
+        "reputation_tier_high_floor": params.reputation_tier_high_floor,
+        "familiarity_trust_bar": params.familiarity_trust_bar,
+        "baseline_familiarity": gathered.baseline_familiarity,
+    }
+    rep_vector = gathered.rep_vector
+    if rep_vector is not None:
+        state["reputation_vt_score"] = rep_vector.vt_detection_ratio
+        state["reputation_ti_score"] = rep_vector.ti_risk
+        state["reputation_abuse_score"] = rep_vector.abuse_risk
+    return state
+
+
+def decide(gathered: GatheredCycle, params: DecisionParameters) -> Tuple[Dict[str, Any], List[Evidence]]:
+    """DECIDE: pure -- the decision for `gathered` under `params`, and the merged evidence it was made on. No graph
+    access, no autotuner read, no module state written; `gathered` is not modified (the decision engine gets its own
+    copy of the features)."""
+    ts = gathered.ts
+    fresh_v2 = list(gathered.fresh_v2)
+    merged_v2: List[Evidence] = fresh_v2
+    if gathered.device_id:
+        # Dedup by CONTENT, not evidence_id -- convert() assigns a fresh, random evidence_id on every call, so the
+        # same observation converted fresh this cycle and read back from the graph would never match on id alone.
+        fresh_keys = {_content_key(ev) for ev in fresh_v2}
+        merged_v2 = [ev for ev in gathered.windowed_v2 if _content_key(ev) not in fresh_keys] + fresh_v2
+        for item in gathered.graph_derived:
+            if isinstance(item, _ReputationCandidate):
+                if ts - item.cached_at <= params.reputation_propagation_ttl_seconds:
+                    merged_v2.append(Evidence(
+                        device_id=gathered.device_id, destination_id=item.destination, evidence_type="reputation",
+                        independence_family="reputation", timestamp=ts,
+                        source="v13_live_engine", confidence=1.0, value=item.tier,
+                        provenance="v13_live_engine:reputation_propagation",
+                    ))
+            else:
+                merged_v2.append(item)
+        merged_v2 += _peer_deviation_evidence(gathered.device_id, gathered.peer_stats, params, ts)
+        merged_v2 += list(gathered.baseline_v2)
+        merged_v2 += list(gathered.domain_age_v2)
+    decision = _v13_engine.evaluate(
+        merged_v2, _tuned_rep_vector(gathered.rep_vector, params), device_type=gathered.device_type,
+        baseline_familiarity=gathered.baseline_familiarity,
+        features=dict(gathered.features) if gathered.features is not None else None, is_safe=gathered.is_safe,
+        now=ts, hard_stop_candidate_sensitivity=params.hard_stop_candidate_sensitivity,
+        familiarity_trust_bar=params.familiarity_trust_bar,
+    )
+    decision["_autotune_state"] = _autotune_state(gathered, params)
+    decision["_sources"] = dict(gathered.sources)     # what was available when this was decided
+    return decision, merged_v2
+
+
+def commit_cycle(gathered: GatheredCycle, decision: Dict[str, Any], merged_v2: List[Evidence]) -> None:
+    """COMMIT: the real decision's writes -- graph rows and per-device bookkeeping. Only ever for the champion."""
+    device_id = gathered.device_id
+    if not device_id:
+        return
+    # Feeds the NEXT cycle's `risk` baseline metric (one-cycle-lagged, see _inject_baseline_evidence()).
+    _last_risk_score[device_id] = float(
+        decision.get("hypotheses", {}).get("attack", {}).get("score", 0.0) or 0.0)
+    _write_graph(device_id, gathered.ts, list(gathered.fresh_v2), merged_v2, decision)
+    # alert/decision unification (Phase 2): the most recently written decision_id for this device, whether or not
+    # THIS cycle wrote a new row -- the target pipeline.py enriches with alert_payload/fp_verdict/outcome fields.
+    decision["_graph_decision_id"] = _last_decision_id.get(device_id)
+    _maybe_checkpoint_wal(gathered.ts)
+
+
+def evaluate_cycle(active_evidence_v1: List, rep_vector, device_type: str = "",
+                   baseline_familiarity: float = 0.0, features: Optional[dict] = None,
+                   is_safe: bool = False, device_id: Optional[str] = None, now: Optional[float] = None,
+                   geoip_engine=None, sources: Optional[Mapping[str, str]] = None
+                   ) -> Tuple[Dict[str, Any], Optional[EvaluatedCycle]]:
+    """evaluate() plus the EvaluatedCycle it decided (None when the cycle could not be evaluated) -- what
+    maybe_shadow_evaluate() needs to evaluate a canary on exactly this cycle and these champion parameters."""
+    try:
+        gathered = gather_cycle(active_evidence_v1, rep_vector, device_type=device_type,
+                                baseline_familiarity=baseline_familiarity, features=features, is_safe=is_safe,
+                                device_id=device_id, now=now, geoip_engine=geoip_engine, sources=sources)
+        params = resolve_decision_parameters(gathered.device_id)
+        decision, merged_v2 = decide(gathered, params)
+        commit_cycle(gathered, decision, merged_v2)
+        return decision, EvaluatedCycle(gathered, params)
+    except Exception as e:
+        LOGGER.error(
+            "Decision engine raised %s -- this cycle is not evaluated (no action); the evidence stays for the "
+            "next cycle. This should never happen in normal operation; investigate.", e, exc_info=True,
+        )
+        _note_engine_error("decision", e)
+        return not_evaluated_decision(str(e)), None
+
+
+def redecide_with_evidence(cycle: Optional[EvaluatedCycle], new_evidence_v1: List) -> Optional[Dict[str, Any]]:
+    """The decision for an already-decided cycle plus evidence that arrived after it (pipeline.py's GeoIP step adds a
+    geofencing hard-stop item). Same context as the main decision -- the cycle's gathered facts (graph history, derived
+    signals, baselines, features, familiarity) and champion parameters -- through the pure decide(): nothing is gathered
+    again, nothing is written. The caller persists the result with write_supplementary_decision() (which also writes
+    the new evidence). None when the cycle was not evaluated (no EvaluatedCycle): that cycle stays "not evaluated, no
+    action" -- a decision under another path would use different rules (module docstring)."""
+    if cycle is None:
+        return None
+    extra = tuple(_convert_active_evidence(new_evidence_v1, dict(cycle.gathered.features or {})))
+    gathered = dataclasses.replace(cycle.gathered, fresh_v2=cycle.gathered.fresh_v2 + extra)
+    try:
+        decision, _merged = decide(gathered, cycle.params)
+        return decision
+    except Exception as e:
+        LOGGER.error(
+            "Re-decision with new evidence raised %s -- keeping the cycle's earlier decision; investigate.", e,
+            exc_info=True,
+        )
+        _note_engine_error("decision", e)
+        return None
+
+
 def evaluate(active_evidence_v1: List, rep_vector, device_type: str = "",
              baseline_familiarity: float = 0.0, features: Optional[dict] = None,
              is_safe: bool = False,
@@ -1147,167 +1380,13 @@ def evaluate(active_evidence_v1: List, rep_vector, device_type: str = "",
 
     `geoip_engine` (optional, live audit 2026-09-08): pipeline.py's own already-
     constructed `GeoIPEngine` instance, reused as-is rather than this module
-    opening a second mmdb reader -- see `_inject_graph_derived_evidence()`'s own
+    opening a second mmdb reader -- see `_gather_graph_derived()`'s own
     docstring for what it gates. Omitting it degrades to today's behavior
     unchanged, same graceful-degradation contract as every other optional
     dependency in this module."""
-    try:
-        fresh_v2 = _convert_active_evidence(active_evidence_v1, features or {})
-        ts = now if now is not None else time.time()
-
-        merged_v2 = fresh_v2
-        if device_id:
-            windowed_v2 = _query_graph_window(device_id, ts)
-            # Dedup by CONTENT, not evidence_id -- convert() assigns a fresh, random
-            # evidence_id on every call, so the same real observation converted fresh
-            # this cycle and the same observation read back from the graph (written on
-            # an earlier cycle) would never match on evidence_id alone, double-counting
-            # it in the merged list handed to the decision engine.
-            fresh_keys = {_content_key(ev) for ev in fresh_v2}
-            merged_v2 = [ev for ev in windowed_v2 if _content_key(ev) not in fresh_keys] + fresh_v2
-
-            # Phase 1a: cross-device correlation / reputation propagation / genuine
-            # first-contact scoring -- computed from THIS cycle's real destinations
-            # only (not the whole windowed history), added to merged_v2 alone. See
-            # _inject_graph_derived_evidence()'s own docstring for why these must
-            # never reach fresh_v2 (the graph-write path).
-            fresh_destinations = {ev.destination_id for ev in fresh_v2}
-            merged_v2 = merged_v2 + _inject_graph_derived_evidence(
-                device_id, fresh_destinations, ts, fresh_v2, geoip_engine=geoip_engine)
-
-            # Release 14, N2: peer-cohort behavioral baselining -- a genuinely NEW,
-            # unvalidated heuristic (unlike coordinated_targeting/fingerprint_campaign/
-            # dga_seed_campaign, which all reuse well-established, low-false-positive
-            # correlation concepts), so kept as its own separate injection call rather
-            # than folded into _inject_graph_derived_evidence() above. See
-            # _inject_peer_deviation_evidence()'s own docstring for the honest-status
-            # framing and why PeerDeviationHypothesis is deliberately capped low.
-            merged_v2 = merged_v2 + _inject_peer_deviation_evidence(device_id, device_type, ts)
-
-            # Release 15 Sheet 00, live wiring (2026-09-16): Bayesian Gaussian/Beta/
-            # Poisson/Markov + BOCPD changepoint scoring -- see
-            # _inject_baseline_evidence()'s own docstring for the full porting
-            # rationale from argus/ingest/daemon.py's (`.19`-only) reference
-            # implementation.
-            merged_v2 = merged_v2 + _inject_baseline_evidence(device_id, features or {}, fresh_v2, ts)
-
-            # Domain age (opt-in): supporting context only -- see _inject_domain_age_evidence().
-            merged_v2 = merged_v2 + _inject_domain_age_evidence(device_id, fresh_v2, ts)
-
-        # Sheet 03a live-wiring follow-up: same `if device_id:` gate as every other
-        # graph-touching feature above -- omitting device_id means ZERO graph
-        # interaction (this function's own pre-Phase-1 contract, still enforced by
-        # this module's own test suite), so the autotuner lookup only runs when
-        # a device_id was actually given to scope it to.
-        #
-        # BUGFIX (caught by this module's own test suite, "a broken graph read
-        # never raises out of evaluate()"): this must degrade gracefully exactly
-        # like _query_graph_window()/_inject_graph_derived_evidence() above, not
-        # propagate into the OUTER try/except (which logs "this should never
-        # happen in normal operation" -- the wrong semantic for an ordinary,
-        # expected-to-be-resilient dependency like a GraphStore read). A broken
-        # autotune lookup falls back to the untouched original rep_vector and no
-        # hard-stop-sensitivity override, identical to this function's behavior
-        # before Sheet 03a's live wiring.
-        tuned_rep = rep_vector
-        hard_stop_sensitivity = None
-        familiarity_trust_bar = 0.6  # matches DeviceProfileBenignHypothesis's own hardcoded default
-        # Autonomous-behavior traceability (Documentation/ALERT_TRACE_GRAPH_PLAN.md,
-        # 2026-09-22): the actually-active tunable values this cycle used, stashed
-        # onto the decision dict so pipeline.py can persist them onto the matching
-        # alert_event's autotune_state_json -- otherwise this 3-tier resolution
-        # (device -> device_type -> global, AutotuneEngine.get_active_value()'s own
-        # docstring) happens here and is gone, with no way for an operator looking
-        # at a specific alert to see whether/how autotuning shaped it. Values only
-        # (not which threshold_history.change_id produced each one) -- a smaller,
-        # lower-risk first cut; resolving the exact change_id per parameter would
-        # mean threading _promoted_value_at_scope()'s internals out through a public
-        # return, deferred rather than done speculatively here.
-        autotune_state: Dict[str, Any] = {}
-        if device_id:
-            try:
-                autotune = _get_autotune_engine()
-                tuned_rep = _tuned_rep_vector(rep_vector, device_id, autotune)
-                hard_stop_sensitivity = autotune.get_active_value(
-                    "hard_stop_candidate_sensitivity", device_id, default=None)
-                familiarity_trust_bar = autotune.get_active_value(
-                    "familiarity_trust_bar", device_id, default=0.6)
-                autotune_state = {
-                    "hard_stop_candidate_sensitivity": hard_stop_sensitivity,
-                    "reputation_tier_suspicious_floor": autotune.get_active_value(
-                        "reputation_tier_suspicious_floor", device_id, default=2.0),
-                    "reputation_tier_high_floor": autotune.get_active_value(
-                        "reputation_tier_high_floor", device_id, default=4.0),
-                    "familiarity_trust_bar": familiarity_trust_bar,
-                    # 2026-09-27 (Phase 3): the actual familiarity SCORE this cycle
-                    # judged against the bar above -- without this, a retroactive
-                    # calibration generator has no way to tell whether a different
-                    # bar would have changed DeviceProfileBenignHypothesis's outcome
-                    # for this decision (same reasoning as the reputation scores
-                    # added in Phase 1, just for this parameter's own boundary).
-                    "baseline_familiarity": baseline_familiarity,
-                }
-                # 2026-09-27 (Phase 1 of the autonomy-completion effort): the raw
-                # scores classify() actually judged this cycle against the two
-                # floors above -- without these, a retroactive calibration
-                # generator for either floor has no way to tell whether a
-                # DIFFERENT floor value would have changed this decision's
-                # reputation-tier outcome (confirmed via direct investigation:
-                # the `reputation` evidence_type row this cycle may also write
-                # only ever stores the resulting TIER, not these inputs, and
-                # its own features_json is unpopulated). Only meaningful when
-                # rep_vector was actually classified this cycle (device_id and
-                # rep_vector both set, same guard as tuned_rep above).
-                if rep_vector is not None:
-                    autotune_state["reputation_vt_score"] = rep_vector.vt_detection_ratio
-                    autotune_state["reputation_ti_score"] = rep_vector.ti_risk
-                    autotune_state["reputation_abuse_score"] = rep_vector.abuse_risk
-            except Exception as e:
-                LOGGER.warning(
-                    "Failed to resolve live-tunable autotuner parameters for device %r, "
-                    "deciding with defaults this cycle: %s", device_id, e,
-                )
-
-        decision = _v13_engine.evaluate(
-            merged_v2, tuned_rep, device_type=device_type,
-            baseline_familiarity=baseline_familiarity, features=features, is_safe=is_safe,
-            now=ts, hard_stop_candidate_sensitivity=hard_stop_sensitivity,
-            familiarity_trust_bar=familiarity_trust_bar,
-        )
-        # See autotune_state's own comment above -- attached here (not persisted
-        # into raw_payload_json by insert_decision(), which runs on this SAME dict
-        # a few lines below via _write_graph(), so it also rides along there for
-        # free as decision audit context) so pipeline.py can read it back later via
-        # decision.get("_autotune_state") to populate the alert_event, mirroring
-        # how "_graph_decision_id" already gets attached the same way below.
-        decision["_autotune_state"] = autotune_state
-
-        if device_id:
-            # Feeds the NEXT cycle's `risk` baseline metric (see
-            # _inject_baseline_evidence()'s own module comment on why this must be
-            # one-cycle-lagged) -- same risk_score definition daemon.py's own
-            # _run_cycle() caches for the identical reason.
-            _last_risk_score[device_id] = float(
-                decision.get("hypotheses", {}).get("attack", {}).get("score", 0.0) or 0.0)
-            _write_graph(device_id, ts, fresh_v2, merged_v2, decision)
-            # alert/decision unification (Phase 2): the
-            # most recently written decision_id for this device, whether or not
-            # THIS cycle itself wrote a new row (see _last_decision_id's own
-            # module-level comment) -- gives pipeline.py a real target for later
-            # enriching this decision with alert_payload/fp_verdict/incident-outcome
-            # fields via GraphStore.update_decision_payload(). None (never set) if
-            # the graph write itself has never succeeded for this device yet.
-            decision["_graph_decision_id"] = _last_decision_id.get(device_id)
-            _maybe_checkpoint_wal(ts)
-
-        return decision
-    except Exception as e:
-        LOGGER.error(
-            "Decision engine raised %s -- this cycle is not evaluated (no action); the evidence stays for the "
-            "next cycle. This should never happen in normal operation; investigate.", e, exc_info=True,
-        )
-        _note_engine_error("decision", e)
-        return not_evaluated_decision(str(e))
+    return evaluate_cycle(active_evidence_v1, rep_vector, device_type=device_type,
+                          baseline_familiarity=baseline_familiarity, features=features, is_safe=is_safe,
+                          device_id=device_id, now=now, geoip_engine=geoip_engine)[0]
 
 
 # --- engine errors (read by the health manager) --------------------------------------------------------------------
@@ -1480,26 +1559,17 @@ def _get_shadow_evaluator():
     return _shadow_evaluator
 
 
-def maybe_shadow_evaluate(active_evidence, rep_vector, device_type: str, baseline_familiarity: float,
-                            features: dict, is_safe: bool, device_id: str, real_state: str,
-                            now: Optional[float] = None) -> None:
-    """The pipeline.py call site for Phase 7 (16-parameter autonomy plan) --
-    called immediately after the real argus_live_engine.evaluate() call above,
-    passing the SAME inputs plus that call's own decision["state"] as
-    real_state for the agreement comparison. Fire-and-forget, compute-only:
-    returns nothing, never raises -- a shadow-eval failure must never affect
-    the real decision this cycle already made. Picks at most one active canary per cycle (see
-    ShadowEvaluator.maybe_shadow_evaluate's own docstring for the scope
-    preference order); a no-op whenever no canary is active or resource
-    pressure is high, at negligible cost either way."""
-    ts = now if now is not None else time.time()
+def maybe_shadow_evaluate(cycle: Optional[EvaluatedCycle], real_state: str, now: Optional[float] = None) -> None:
+    """The pipeline.py call site for Phase 7 (16-parameter autonomy plan): called right after evaluate_cycle() with
+    the EvaluatedCycle that real decision was made on and its state. Fire-and-forget, compute-only: the shadow is
+    decide() on that same cycle with one candidate parameter -- no learner, graph or bookkeeping is touched (U7).
+    Returns nothing, never raises. A no-op when the cycle was not evaluated, no canary applies, or resource pressure
+    is high."""
+    if cycle is None:
+        return
+    ts = now if now is not None else cycle.gathered.ts
     try:
-        evaluator = _get_shadow_evaluator()
-        evaluator.maybe_shadow_evaluate(
-            device_id=device_id, device_type=device_type, active_evidence_v1=active_evidence,
-            rep_vector=rep_vector, features=features, is_safe=is_safe,
-            baseline_familiarity=baseline_familiarity, real_state=real_state, now=ts,
-        )
+        _get_shadow_evaluator().maybe_shadow_evaluate(cycle, real_state=real_state, now=ts)
     except Exception as e:
         LOGGER.error(
             "Shadow-evaluation sandbox failed (compute-only -- the real decision this "

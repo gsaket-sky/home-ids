@@ -99,7 +99,7 @@ class ThreatSignalDetector:
                 return True
             return bool(ti_engine and ti_engine.is_allowlisted(domain))
 
-        def add(etype: str, value: float, confidence: float, group: str, note: str,
+        def add(etype: str, value: float, confidence: float, note: str,
                 subtag: Optional[str] = None, domain: Optional[str] = None,
                 targets=(), target_count: int = 0) -> None:
             # `subtag` is a STABLE category tag (e.g. "txt_null_abuse") distinct from the
@@ -115,7 +115,7 @@ class ThreatSignalDetector:
             ev_list.append(Evidence(
                 type=etype, source="threat_signals", timestamp=now, device=device,
                 value=value, confidence=max(0.0, min(1.0, confidence)),
-                independence_group=group, provenance=f"detector:threat_signals:{etype}:{tag}:{note}",
+                provenance=f"detector:threat_signals:{etype}:{tag}:{note}",
                 domain=domain, targets=tuple(targets or ()), target_count=int(target_count or 0),
             ))
 
@@ -152,16 +152,16 @@ class ThreatSignalDetector:
         dga_evidence_domain = dga_domain_examples[0] if dga_domain_examples else None
         dga_examples_note = f" e.g.={','.join(dga_domain_examples)}" if dga_domain_examples else ""
         if sd >= 15:
-            add("dns_dga_burst", sd, min(1.0, 0.6 + sd / 50.0), "dns_behavior",
+            add("dns_dga_burst", sd, min(1.0, 0.6 + sd / 50.0),
                 f"absolute burst {int(sd)} domains{dga_examples_note}", domain=dga_evidence_domain)
         elif sd >= 5 and entropy_avg > 3.5:
-            add("dns_dga_burst", sd, 0.6, "dns_behavior",
+            add("dns_dga_burst", sd, 0.6,
                 f"elevated {int(sd)} domains entropy={entropy_avg:.2f}{dga_examples_note}", domain=dga_evidence_domain)
         elif not is_telemetry and dga_score > 0.40:
             # 1-hour, novelty-gated NXDOMAIN score (dns_features._dga_score, W-04): the per-domain source protection
             # now lives in the producer, which also names the domains behind the score.
             dga_score_examples = features.get("dga_score_examples", []) or []
-            add("dns_dga_burst", dga_score, min(1.0, dga_score), "dns_behavior",
+            add("dns_dga_burst", dga_score, min(1.0, dga_score),
                 f"classifier score {dga_score:.2f}"
                 + (f" e.g.={','.join(dga_score_examples)}" if dga_score_examples else ""),
                 domain=dga_score_examples[0] if dga_score_examples else None)
@@ -211,7 +211,7 @@ class ThreatSignalDetector:
         evidence_domain = max_label_domain if max_label > 55 else (tunnel_domain_examples[0] if tunnel_domain_examples else None)
         if (tunnel_domains >= 2 or max_label > 55) and not is_known_safe_domain(evidence_domain):
             examples_note = f" e.g.={','.join(tunnel_domain_examples)}" if tunnel_domain_examples else ""
-            add("dns_tunnel_v2", max_label, min(1.0, 0.5 + tunnel_domains * 0.15), "dns_tunnel_v2",
+            add("dns_tunnel_v2", max_label, min(1.0, 0.5 + tunnel_domains * 0.15),
                 f"encoded/long labels max={int(max_label)} domain={max_label_domain or '?'} count={int(tunnel_domains)}{examples_note}",
                 subtag="encoded_labels", domain=evidence_domain)
         # Sliding-window subdomain fanout: many distinct labels sharing one registrable
@@ -231,17 +231,17 @@ class ThreatSignalDetector:
             # top of the count-based baseline, capped so entropy alone (with a low
             # count just above the 8 floor) can't dominate the score.
             entropy_bonus = min(0.3, max(0.0, fanout_label_entropy - 3.0) * 0.2)
-            add("dns_tunnel_v2", fanout_count, min(1.0, 0.4 + fanout_count * 0.04 + entropy_bonus), "dns_tunnel_v2",
+            add("dns_tunnel_v2", fanout_count, min(1.0, 0.4 + fanout_count * 0.04 + entropy_bonus),
                 f"{int(fanout_count)} distinct subdomains under one parent domain={fanout_domain or '?'} in-window "
                 f"(avg label entropy={fanout_label_entropy:.2f})",
                 subtag="subdomain_fanout", domain=fanout_domain)
         if not is_telemetry and txt_null_ratio > 0.15:
             # Pure aggregate ratio, no specific domain to check at the source -- keep
             # the device-wide gate for this one, same reasoning as the dga_score branch.
-            add("dns_tunnel_v2", txt_null_ratio, min(1.0, txt_null_ratio * 2.0), "dns_tunnel_v2",
+            add("dns_tunnel_v2", txt_null_ratio, min(1.0, txt_null_ratio * 2.0),
                 f"txt/null ratio {txt_null_ratio:.2f}", subtag="txt_null_abuse")
         if not is_telemetry and susp_tld_ratio > 0.15:
-            add("dns_tunnel_v2", susp_tld_ratio, min(1.0, susp_tld_ratio * 2.0), "dns_tunnel_v2",
+            add("dns_tunnel_v2", susp_tld_ratio, min(1.0, susp_tld_ratio * 2.0),
                 f"suspicious tld ratio {susp_tld_ratio:.2f}", subtag="suspicious_tld")
 
         # ── Exfiltration byte bursts ─────────────────────────────────────────────────
@@ -283,12 +283,12 @@ class ThreatSignalDetector:
             # genuinely extreme burst to one of these domains is real signal worth
             # SOME weight, even reduced -- dampen the same way, don't zero it.
             conf = 0.5 if is_vendor_cloud_api else 0.9
-            add("zeek_exfiltration", outbound_z, conf, "zeek_network",
+            add("zeek_exfiltration", outbound_z, conf,
                 f"massive burst Z={outbound_z:.2f} bytes={int(outbound_bytes)}",
                 domain=exfil_domain)
         elif outbound_z > 3.5 and outbound_bytes > 250000 and not is_telemetry:
             conf = 0.35 if is_vendor_cloud_api else 0.6
-            add("zeek_exfiltration", outbound_z, conf, "zeek_network",
+            add("zeek_exfiltration", outbound_z, conf,
                 f"elevated Z={outbound_z:.2f} bytes={int(outbound_bytes)}",
                 domain=exfil_domain)
         # BUGFIX (external architecture review, 2026-09-09): this branch used to fire
@@ -310,7 +310,7 @@ class ThreatSignalDetector:
             # suppress fix as the massive-burst tier above -- this used to also hard-gate
             # on `not is_vendor_cloud_api`.
             conf = 0.25 if is_vendor_cloud_api else 0.55
-            add("zeek_exfiltration", outbound_bytes, conf, "zeek_network",
+            add("zeek_exfiltration", outbound_bytes, conf,
                 f"absolute volume bytes={int(outbound_bytes)} Z={outbound_z:.2f}",
                 domain=exfil_domain)
 
@@ -346,19 +346,19 @@ class ThreatSignalDetector:
         # the ceiling for the two thinner tags the same way DNS_ATTRIBUTION_GAP's
         # ambiguous case is already capped elsewhere in this codebase.
         if beacon_c2_1h > 0 and not is_telemetry:
-            add("zeek_beaconing", beacon_c2_1h, 0.7, "zeek_network",
+            add("zeek_beaconing", beacon_c2_1h, 0.7,
                 f"low-and-slow c2 periodicity {int(beacon_c2_1h)} sequences",
                 subtag="low_and_slow", domain=slow_beacon_domain)
         elif beacon_tdr > 0.75 and beacon_total >= 15:
             conf = min(1.0, beacon_tdr) * (0.1 if is_telemetry else 1.0)
             if conf > 0:
                 # W-04: the producer (zeek_features._beacon_features) names the destination it measured.
-                add("zeek_beaconing", beacon_tdr, conf, "zeek_network",
+                add("zeek_beaconing", beacon_tdr, conf,
                     f"persistent single-target beaconing tdr={beacon_tdr:.2f} total={int(beacon_total)}",
                     subtag="persistent_single_target", domain=features.get("beacon_domain") or None)
         elif c2_jitter > 0 and not is_telemetry and not _is_local_name(jitter_beacon_domain):
             conf = 0.3 if outbound_bytes == 0 else 0.55
-            add("zeek_beaconing", c2_jitter, conf, "zeek_network",
+            add("zeek_beaconing", c2_jitter, conf,
                 f"uniform check-in jitter {int(c2_jitter)} hits",
                 subtag="uniform_jitter", domain=jitter_beacon_domain)
 
@@ -402,7 +402,7 @@ class ThreatSignalDetector:
             rej_evidence_ip = rej_ip_examples[0] if rej_ip_examples else None
             if rej_ip_examples:
                 note += f"; e.g.={','.join(rej_ip_examples)}"
-            add("zeek_conn_abuse", s0_rej, conf, "zeek_network", note, domain=rej_evidence_ip,
+            add("zeek_conn_abuse", s0_rej, conf, note, domain=rej_evidence_ip,
                 targets=rej_ip_examples, target_count=int(s0_rej_unique))
 
         # ── ARP host-discovery sweep (recon precursor) ───────────────────────────────
@@ -427,14 +427,14 @@ class ThreatSignalDetector:
             note = f"ARP-requested {int(arp_sweep_count)} distinct targets (host-discovery sweep)"
             if swept_examples:
                 note += f"; e.g.={','.join(swept_examples)}"
-            add("arp_sweep", arp_sweep_count, conf, "lan_recon", note, domain=rep_swept_ip,
+            add("arp_sweep", arp_sweep_count, conf, note, domain=rep_swept_ip,
                 targets=swept_examples, target_count=int(arp_sweep_count))
 
         # ── Long-lived / covert-tunnel connections ───────────────────────────────────
         max_dur = float(features.get("zeek_max_duration", 0.0) or 0.0)
         if max_dur > 43200:
-            add("zeek_long_conn", max_dur, 0.85, "zeek_network", f"extreme duration {int(max_dur)}s")
+            add("zeek_long_conn", max_dur, 0.85, f"extreme duration {int(max_dur)}s")
         elif max_dur > long_conn_duration_threshold:
-            add("zeek_long_conn", max_dur, 0.5, "zeek_network", f"long duration {int(max_dur)}s")
+            add("zeek_long_conn", max_dur, 0.5, f"long duration {int(max_dur)}s")
 
         return ev_list

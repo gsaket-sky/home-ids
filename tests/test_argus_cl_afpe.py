@@ -482,6 +482,9 @@ check("evaluate() suppresses immediately once BOTH trust-cache AND composite_tru
       "agree (TRUST_CACHE, no ML stages run)",
       v["verdict"] == "FALSE_POSITIVE" and v["stage"] == "TRUST_CACHE")
 
+# U6 (2026-10-14): the static fallback no longer suppresses, so nothing earlier in this file widens shadow_dev's shift back up
+# from the -1.5 floor any more; widen it explicitly so this check is about the override itself.
+cl_afpe._apply_sigma_shift("shadow_dev", now=NOW)
 sigma_before = cl_afpe.get_sigma_shift("shadow_dev")
 v = _evaluate(cl_afpe, _alert(domain="trusted-vendor-example.com", features={"zeek_honeypot_hits": 1}))
 check("evaluate() RE-RUNS Stage 1 even on a trust-cache hit and overrides it on a "
@@ -491,9 +494,26 @@ check("...and tunes sensitivity UP as a side effect of the override, same as a "
       "fresh (non-cached) hard-stop would",
       cl_afpe.get_sigma_shift("shadow_dev") < sigma_before)
 
-# --- Stage 2/3 final verdict branches (no real ML model -- deterministic rule fallback) ---
+# --- Stage 2/3 final verdict branches ---
+# U6 (2026-10-14): with no model loaded the static rule fallback may rank, never suppress or immunize
+# (tests/test_argus_cl_afpe_no_suppress_rules.py covers the rule); suppression is exercised with a loaded-model stand-in.
+class _LoadedModel:
+    """Classifier at the not-ready sentinel, embedding similarity above the threshold for a known vendor."""
+    def score_stage2(self, features, domain, is_trust_cached=False):
+        return 0.50
+
+    def score_stage3(self, domain):
+        return 0.92, "known telemetry vendor"
+
+
+cl_afpe_model = ClAfpeEngine(store, ml_scorer=_LoadedModel())
 v = _evaluate(cl_afpe, _alert(domain="sentry.io"))
-check("evaluate() suppresses via Stage 2/3 when Stage 3's rule fallback alone clears "
+check("evaluate() with no model: Stage 3's static rule fallback alone does NOT suppress a known telemetry vendor domain "
+      "(UNCERTAIN, nothing immunized)",
+      v["verdict"] == "UNCERTAIN" and v["stage"] == "STAGE_3_COMBINED"
+      and not cl_afpe.is_trust_cached("sentry.io", device_id="shadow_dev", hypothesis="NETWORK_INTRUSION", now=NOW))
+v = _evaluate(cl_afpe_model, _alert(domain="sentry.io"))
+check("evaluate() suppresses via Stage 2/3 when a loaded model's Stage 3 clears "
       "the embed-similarity threshold for a known telemetry vendor domain",
       v["verdict"] == "FALSE_POSITIVE" and v["stage"] == "STAGE_3_COMBINED"
       and cl_afpe.is_trust_cached("sentry.io", device_id="shadow_dev", hypothesis="NETWORK_INTRUSION", now=NOW))
@@ -531,14 +551,18 @@ check("...and a combined score that WOULD suppress against the global default "
 # mark_false_positive()'s threshold-bump branch, not domain immunization -- same
 # mutual-exclusivity guarantee as Phase 6a, now proven reachable via evaluate() too.
 store.upsert_device("shadow_dev2", timestamp=NOW)
-v = _evaluate(cl_afpe, _alert(device_id="shadow_dev2", hostname="shadow2", signature="CONNECTION_ABUSE",
+v = _evaluate(cl_afpe_model, _alert(device_id="shadow_dev2", hostname="shadow2", signature="CONNECTION_ABUSE",
                                 domain="sentry.io", features={"zeek_arp_sweep_count": 5}))
-check("evaluate()'s FALSE_POSITIVE branch for a CONNECTION_ABUSE signature bumps "
-      "this device's own threshold instead of immunizing the domain, and carries "
+# U5 (2026-10-14): this correction is automatic (autonomous_stage23): it raises the threshold one step but never past 1.5x
+# the default (a person's, 2x) -- tests/test_argus_cl_afpe_profile_ceiling.py covers the rule itself.
+_prof = store.get_device_metadata("shadow_dev2").get("fp_profile", {}).get("arp_sweep_unique_targets_threshold", {})
+check("evaluate()'s FALSE_POSITIVE branch for a CONNECTION_ABUSE signature bumps this device's own threshold "
+      "(one step, within the automatic ceiling) instead of immunizing the domain, and carries "
       "no 'action' (immunize_domain) payload",
       v["verdict"] == "FALSE_POSITIVE"
-      and cl_afpe.get_device_arp_sweep_threshold("shadow_dev2") > 8.0
-      and v.get("action") is None)
+      and 8.0 < cl_afpe.get_device_arp_sweep_threshold("shadow_dev2") <= 12.0
+      and int(_prof.get("correction_count", 0)) >= 1
+      and v.get("action") is None, str(_prof))
 
 # --- local-intel Check 7, wired through the composed evaluate() end-to-end ---
 real_local_intel_dir2 = _PathForSysPath(tempfile.mkdtemp(prefix="v13_clafpe_shadow_intel_"))

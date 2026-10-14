@@ -21,6 +21,7 @@ if str(SRC_DIR) not in sys.path:
 from core.state_guard import StateManager  # noqa: E402
 import mitigation.ips as ips_module  # noqa: E402
 from mitigation.ips import IPSMitigator  # noqa: E402
+from mitigation.containment_gate import MONITOR_ONLY, ContainmentAuthorization  # noqa: E402
 
 
 @pytest.fixture
@@ -249,8 +250,8 @@ def test_mitigate_autonomous_router_isolation_now_also_arms_tarpit(mitigator, mo
     mitigator.config["interactive_blocking_enabled"] = False
     monkeypatch.setattr(mitigator, "_isolate_device_router", lambda **kw: True)
     st = SimpleNamespace(client_ip="10.0.0.5", hostname="host1", device_id="dev1", mac_address="aa:bb:cc:dd:ee:ff")
-    mitigator.mitigate(st, target_domain="unknown", risk_score=8.7, lateral_threat=False,
-                        is_safe=False, decision_state="HIGH")
+    mitigator.mitigate(st, target_domain="unknown", risk_score=8.7, authorization=ContainmentAuthorization("corroborated"),
+                        is_safe=False)
     assert "aa:bb:cc:dd:ee:ff" in mitigator._router_isolated_devices
     assert "dev:dev1" in mitigator._tarpit_active_targets, (
         "risk 8.7 is below tarpit's own 9.0 bar -- this only passes because router "
@@ -264,8 +265,8 @@ def test_mitigate_below_router_threshold_arms_neither(mitigator, monkeypatch):
     mitigator.config["interactive_blocking_enabled"] = False
     monkeypatch.setattr(mitigator, "_isolate_device_router", lambda **kw: True)
     st = SimpleNamespace(client_ip="10.0.0.5", hostname="host1", device_id="dev1", mac_address="aa:bb:cc:dd:ee:ff")
-    mitigator.mitigate(st, target_domain="unknown", risk_score=5.0, lateral_threat=False,
-                        is_safe=False, decision_state="SUSPICIOUS")
+    mitigator.mitigate(st, target_domain="unknown", risk_score=5.0, authorization=MONITOR_ONLY,
+                        is_safe=False)
     assert "aa:bb:cc:dd:ee:ff" not in mitigator._router_isolated_devices
     assert "dev:dev1" not in mitigator._tarpit_active_targets
 
@@ -276,8 +277,8 @@ def test_mitigate_respects_tarpit_follows_router_isolation_opt_out(mitigator, mo
     mitigator.config["ips_tarpit_follows_router_isolation"] = False
     monkeypatch.setattr(mitigator, "_isolate_device_router", lambda **kw: True)
     st = SimpleNamespace(client_ip="10.0.0.5", hostname="host1", device_id="dev1", mac_address="aa:bb:cc:dd:ee:ff")
-    mitigator.mitigate(st, target_domain="unknown", risk_score=8.7, lateral_threat=False,
-                        is_safe=False, decision_state="HIGH")
+    mitigator.mitigate(st, target_domain="unknown", risk_score=8.7, authorization=ContainmentAuthorization("corroborated"),
+                        is_safe=False)
     assert "aa:bb:cc:dd:ee:ff" in mitigator._router_isolated_devices  # router isolation itself unaffected
     assert "dev:dev1" not in mitigator._tarpit_active_targets  # coupling opted out
 

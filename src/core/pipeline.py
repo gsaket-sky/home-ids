@@ -27,13 +27,14 @@ from config import resolve_home_subnets
 from core.state import BoundedSet
 from core.state_guard import StateManager
 from core.identity_journal import IdentityJournal
-from core.heartbeat import HEARTBEATS
+from core.heartbeat import HEARTBEATS, read_component_heartbeats
+from core.source_availability import build_source_availability
 from core.metrics_sync import MetricsExporter
 from core.subprocess_launchers import rotate_subprocess_log_if_oversized
 from extractors.dns_features import FeatureExtractor, PiHoleCollector, apply_device_age_gate, in_learning_period
 from extractors.zeek_features import ZeekCollector, ZeekFeatureExtractor
 from extractors.fritzbox_capture import ReactiveCaptureDispatcher, cleanup_stale_scratch_files  # PHASE 21D
-from intelligence.hypotheses.evidence import EvidenceStore, Evidence
+from intelligence.hypotheses.evidence import EvidenceStore, Evidence, SAFE_DEVICE_DAMPENED_TYPES
 from intelligence import ja3_provenance
 from intelligence.reputation.classifier import ReputationClassifier
 from intelligence.reputation import source_status as reputation_source_status
@@ -45,7 +46,8 @@ from core.incident_tracker import IncidentTracker  # VERSION 10 (incident aggreg
 from incident_key import incident_key as _incident_key
 from core.alert_attribution import attribute_alert_target, describe_target_set  # 2026-10-12: alert target from the evidence that fired
 from mitigation.alerts import AlertManager, AlertJSONWriter
-from mitigation.ips import IPSMitigator, CRITICAL_DEVICE_TYPES
+from mitigation.ips import IPSMitigator
+from mitigation.containment_gate import authorize_containment
 from mitigation.plain_explanation import build_plain_explanation
 from middleware.humanize import resolve_destination_info
 from intelligence.threat_intel import ThreatIntel, AbuseIPDB, VirusTotalClient
@@ -58,7 +60,7 @@ from argus.cl_afpe.state_import import import_legacy_state
 from argus.ops import live_engine as argus_live_engine  # argus fast cutover -- see Documentation/ARGUS_ARCHITECTURE.md
 from argus.identity.live_manager import LiveIdentityManager  # the graph-engine migration, Phase 3
 from argus.config.trust_anchors import bootstrap_trust_anchors, load_hardware_profile  # Phase 13 (zero-site bootstrap E, autonomy-completion effort): trust_anchors is now auto-discovered/authoritative, not hand-configured-only (see bootstrap_trust_anchors()'s own docstring for the gateway-continuity safety guard)
-from argus.hypotheses.independence import INDEPENDENCE_FAMILY_MAP, NON_ATTACK_FAMILIES  # 2026-09-15 Telegram WHY-block dedup fix, see grouped_evidence's own comment
+from argus.hypotheses.independence import INDEPENDENCE_FAMILY_MAP, NON_ATTACK_FAMILIES, family_for  # one family registry (W-13)
 from merge_fragmented_devices import find_fragmented_groups, pick_canonical  # device-identity fragmentation fix, in-process reconciliation worker
 
 
@@ -281,58 +283,38 @@ _EVIDENCE_PLAIN_LANGUAGE = {
     "peer_deviation": "Distinct-destination count far above this device's own peer cohort average",
 }
 
-# VERSION 12 (G8-for-live-alerts, HEE coverage audit): human-readable labels for
-# evidence.py's EVIDENCE_FAMILIES (independence_group values) -- the WHY block below
-# groups evidence by FAMILY (one entry per independence_group, the strongest in each),
-# exactly the "3 DNS features != 3 independent signals" distinction this whole HEE
-# review is about, but the header text still said "N independent signal(s)" -- correct
-# on the COUNT (it always was a family count, not a raw-item count) but using the wrong
-# WORD, which is exactly the ambiguity a third-party review flagged in ollama_soc.py's
-# reporting (see Documentation/DECISION_LOGIC_DEPENDENCY_MAP.md's Gap 4, Phase 50) and
-# that fix never reached this file's own, separate WHY-block text. An unmapped family
-# still degrades gracefully (de-snaked title-cased group name), never KeyErrors --
-# same fallback shape as _EVIDENCE_PLAIN_LANGUAGE above.
+# VERSION 12 (G8-for-live-alerts, HEE coverage audit): human-readable labels for the evidence families -- the WHY
+# block below groups evidence by FAMILY (one entry per family, the strongest in each), exactly the "3 DNS features != 3
+# independent signals" distinction this whole HEE review is about, so the header says "independent evidence families",
+# not "signals" (see Documentation/DECISION_LOGIC_DEPENDENCY_MAP.md's Gap 4, Phase 50).
+# W-13 (2026-10-14): the keys are the families of the ONE registry (argus/hypotheses/independence.py) -- the second
+# vocabulary (zeek_network, lan_recon, blindspot_audit, suricata, dns_tunnel_v2 ...) is gone, and
+# tests/test_telegram_vocabulary_coverage.py requires a label for every registry family. An unmapped family still
+# degrades gracefully (de-snaked title-cased name), never KeyErrors.
 _EVIDENCE_FAMILY_LABELS = {
     "dns_behavior": "DNS Behavior",
-    "dns_tunnel_v2": "DNS Tunneling",
-    "zeek_network": "Network (Zeek)",
-    "lan_recon": "Internal Discovery",
-    "blindspot_audit": "DNS Blind-Spot Audit",
-    "honeypot": "Honeypot",
+    "network_behavior": "Network (Zeek)",
+    "tls_fingerprint": "TLS Fingerprint",
+    "data_transfer_pattern": "Data Transfer Pattern",
+    "network_recon": "Internal Discovery",
+    "direct_observation": "Honeypot",
+    "reputation": "Reputation",
+    "signature_match": "Signature Match",
+    "policy": "Policy",
     "ml_anomaly": "ML Anomaly",
     "local_context": "Local Context",
-    "reputation": "Reputation",
-    "suricata": "Signature Match",
-    # BUGFIX (live audit, 2026-09-09): argus's own finer independence-family split
-    # (hypotheses/independence.py) names these two families -- see
-    # _EVIDENCE_PLAIN_LANGUAGE's matching new entries above for why they were never
-    # reachable here before.
     "cross_device_correlation": "Cross-Device Correlation",
     "peer_cohort_deviation": "Peer-Cohort Deviation",
-    # BUGFIX (live audit, 2026-09-09): argus's INDEPENDENCE_FAMILY_MAP names zeek_notice's
-    # own family "network_behavior" (hypotheses/independence.py), a DIFFERENT string
-    # than the detector evidence's "zeek_network" independence_group above -- a zeek_notice item reaching
-    # the WHY-block via decision["attack_evidence"] (the corroborating-evidence bridge,
-    # not the primary active_evidence loop) carries the argus name directly and fell
-    # through to the generic de-snake-cased fallback ("Network Behavior") instead of
-    # this dict's own "Network (Zeek)" label -- confirmed live, the exact same
-    # evidence shape showed two different family labels depending on which bridge
-    # reached it.
-    "network_behavior": "Network (Zeek)",
-    # BUGFIX (2026-09-15, same pass as grouped_evidence's own canonical-key fix
-    # above): these two families (hypotheses/independence.py's own three-way split
-    # of the detector evidence's single "zeek_network" bucket) had no entry here at all, so they fell
-    # through to the generic de-snake-cased fallback -- harmless for
-    # "data_transfer_pattern" (already reads fine as "Data Transfer Pattern"), but
-    # "tls_fingerprint" rendered as "Tls Fingerprint" (title() only capitalizes the
-    # first letter of each word, not a real acronym).
-    "data_transfer_pattern": "Data Transfer Pattern",
-    "tls_fingerprint": "TLS Fingerprint",
+    "novelty_context": "First Contact",
+    "baseline_deviation": "Baseline Deviation",
+    "regime_change": "Behaviour Regime Change",
+    "registration_age": "Domain Registration Age",
+    "sequence_dynamics": "Behaviour Sequence",
 }
 
 # BUGFIX (live audit, 2026-09-09): the 4 argus-only synthetic evidence types
-# (argus/ops/live_engine.py's _inject_graph_derived_evidence()/
-# _inject_peer_deviation_evidence()) mapped to argus's own independence-family name
+# (argus/ops/live_engine.py's _gather_graph_derived()/
+# _gather_peer_stats()) mapped to argus's own independence-family name
 # (hypotheses/independence.py's INDEPENDENCE_FAMILY_MAP) -- used to bridge
 # decision["winning_evidence"] entries into the WHY-block grouping loop below, since
 # these never exist in active_evidence (pipeline.py's own detector evidence store) at all.
@@ -499,21 +481,19 @@ def _build_status_lines(action_summary: str, mixed_signal: bool) -> tuple:
     )
 
 
-def _canonical_evidence_family(ev_type: str, raw_independence_group: str) -> str:
-    """Resolves the WHY-block DISPLAY grouping key for one evidence item: Argus's
-    own INDEPENDENCE_FAMILY_MAP (hypotheses/independence.py) when this evidence
-    type is covered there, else the raw independence_group whichever detector
-    assigned it at creation. Extracted as its own pure function (2026-09-15) so
-    it's directly testable -- see grouped_evidence's own construction, below,
-    for the real live-alert bug (iPhone/d7cb300865b3 DATA_EXFILTRATION showing
-    "4 independent evidence families" for what hee_independent_sources correctly
-    recorded as 2) this closes: calling this SAME function for every evidence
-    item, regardless of which of the two source loops produced it, means the
-    same real evidence type always collapses into the same dict entry instead of
-    two, under two different family names, depending on which loop reached it
-    first. A pure display-key normalization -- does not change which family any
-    evidence type counts toward for SCORING purposes anywhere else."""
-    return INDEPENDENCE_FAMILY_MAP.get(ev_type, raw_independence_group)
+def _canonical_evidence_family(ev_type: str) -> str:
+    """The WHY-block grouping key for one evidence item: the family from the one registry
+    (argus/hypotheses/independence.py). W-13 (2026-10-14): this used to fall back to the raw `independence_group` a
+    detector assigned (a second vocabulary), which made the same real evidence type land in two dict entries under two
+    names depending on which source loop reached it (the live iPhone DATA_EXFILTRATION alert of 2026-09-15 showed "4
+    independent families" for 2). With one registry the two loops can no longer disagree."""
+    return family_for(ev_type)
+
+
+def evidence_families_for_alert(active_evidence, decision_families) -> list:
+    """The family names persisted on an alert (`hee_evidence_families`): the registry families of the detector evidence
+    in force plus the families the decision itself counted -- one vocabulary."""
+    return sorted({family_for(ev.type) for ev in active_evidence} | set(decision_families or ()))
 
 
 def _route_evidence_into_buckets(ev: Any, canonical_family: str, grouped_evidence: dict,
@@ -1041,6 +1021,12 @@ class EnginePipeline:
         # one instance so the budget is genuinely shared, not per-trigger-type. See
         # ReactiveCaptureDispatcher's docstring in extractors/fritzbox_capture.py.
         self.reactive_capture = ReactiveCaptureDispatcher()
+        # Which evidence sources are available (Zeek, the DNS source, GeoIP, feeds, AbuseIPDB, VirusTotal): one cached
+        # snapshot per cycle, recorded on every decision and alert (core/source_availability.py, P0 capability registry).
+        self.source_availability = build_source_availability(
+            config=self.config, zeek_collector=self.zeek_collector, ti_engine=self.ti_engine,
+            geoip_engine=self.geoip_engine, abuseipdb=self.abuseipdb, virustotal=self.virustotal,
+            heartbeats=lambda: read_component_heartbeats(state_dir), state_dir=state_dir)
         # Seeded to "now", not 0 -- avoids firing a spot-check burst immediately on
         # every process restart; the first one fires after a full interval has
         # elapsed, same as a cron-scheduled job would behave.
@@ -1681,6 +1667,9 @@ class EnginePipeline:
                         client_ip in safe_ips
                         or any(ip in safe_ips for ip in known_ips_snapshot)
                     )
+                    # U2 (2026-10-14): the hostname half of is_safe never switches off the honeypot or ARP-spoof exceptions
+                    # (evidence gates and the decision engine's honeypot rule read is_ip_verified_safe) -- a device can name itself.
+                    # INTERIM (redo: P3 + identity P2-P5 -- noise reduction keyed on verified identity/role; MASTER_TODO 0d register).
                     is_safe = is_ip_verified_safe or (
                         bool(hostname) and any(pat in hostname.lower() for pat in safe_patterns if pat)
                     )
@@ -1971,7 +1960,7 @@ class EnginePipeline:
                 # a membership test and a delete is not lost (runtime trace run 2, 4.3).
                 spoof_info = self.zeek_fx.pop_layer2_spoof(client_ip)
                 if spoof_info:
-                    if is_safe:
+                    if is_ip_verified_safe:
                         LOGGER.info(
                             f"ARP/NDP MAC flip on {client_ip} ({spoof_info['old']} -> {spoof_info['new']}) "
                             f"NOT escalated to a hard-stop -- this IP is explicitly listed in safe_ips."
@@ -1992,10 +1981,10 @@ class EnginePipeline:
                 # of bypassing hypothesis competition.
                 pending_info = self.zeek_fx.pop_pending_spoof(client_ip)
                 if pending_info:
-                    if not is_safe:
+                    if not is_ip_verified_safe:
                         self.evidence_store.add(Evidence(
                             type="arp_spoof_pending", source="zeek", timestamp=now, device=dev_id,
-                            value=1.0, confidence=0.5, independence_group="zeek_network",
+                            value=1.0, confidence=0.5,
                             provenance=f"MAC flip (1st, uncorroborated): {pending_info['old']} -> {pending_info['new']}",
                             domain=client_ip,
                         ))
@@ -2053,7 +2042,7 @@ class EnginePipeline:
                         )
 
                     if ml_score > 0.90:
-                        self.evidence_store.add(Evidence(type="ml_anomaly", source="ml_engine", timestamp=now, device=dev_id, value=ml_score, confidence=ml_score, independence_group="ml_anomaly", provenance="detector:ml"))
+                        self.evidence_store.add(Evidence(type="ml_anomaly", source="ml_engine", timestamp=now, device=dev_id, value=ml_score, confidence=ml_score, provenance="detector:ml"))
                 
                     # GAP 3 FIX B (2026-08-27, explicit product decision, not a bug fix): a
                     # live investigation found home-router (the router, safe_ips-listed)
@@ -2070,7 +2059,7 @@ class EnginePipeline:
                     # still show up via every other detection path (reputation, behavioral
                     # hypotheses, DNS anomalies) -- this narrows one specific hard-stop, not
                     # the device's overall exposure.
-                    if features.get("zeek_honeypot_hits", 0) > 0 and not is_safe:
+                    if features.get("zeek_honeypot_hits", 0) > 0 and not is_ip_verified_safe:
                         # BUGFIX (live alert audit): the same attribution gap already fixed for
                         # CONNECTION_ABUSE/DGA_BOTNET_C2/NETWORK_INTRUSION/ARP-spoofing below --
                         # this evidence previously carried no .domain at all, so a CRITICAL
@@ -2082,15 +2071,15 @@ class EnginePipeline:
                         # entry was actually hit -- attach it here, consumed by the
                         # "Internal Honeypot Accessed" branch below.
                         honeypot_hit_ip = self.zeek_fx.get_last_honeypot_ip(known_ips_snapshot) if self.zeek_fx else None
-                        self.evidence_store.add(Evidence(type="honeypot_access", source="zeek", timestamp=now, device=dev_id, value=features["zeek_honeypot_hits"], confidence=1.0, independence_group="honeypot", provenance="detector:honeypot", domain=honeypot_hit_ip))
+                        self.evidence_store.add(Evidence(type="honeypot_access", source="zeek", timestamp=now, device=dev_id, value=features["zeek_honeypot_hits"], confidence=1.0, provenance="detector:honeypot", domain=honeypot_hit_ip))
                 
                     # BUGFIX: found via a third-party review of a real tarpit alert, verified
                     # against production data -- this fed NetworkIntrusionHypothesis's own
                     # "Hard escalate for lateral scans (very rarely benign on a home network)"
                     # branch (argus/hypotheses/engine.py), which force-escalates to HIGH whenever
                     # this evidence's value > 0 -- the SAME raw-connection-count gap already
-                    # fixed at the CL-AFPE's Stage-1 hard-stop and this file's lateral_threat
-                    # (tarpit authorization), just missed here. A single legitimate SMB/SSH/
+                    # fixed at the CL-AFPE's Stage-1 hard-stop and this file's former lateral_threat
+                    # (tarpit authorization, removed by U1 2026-10-14), just missed here. A single legitimate SMB/SSH/
                     # RDP connection to one internal device is not "very rarely benign" --
                     # it's routine. Same distinct-target threshold as those two fixes.
                     lateral_unique_targets = int(features.get("zeek_lateral_unique_targets", 0) or 0)
@@ -2098,7 +2087,7 @@ class EnginePipeline:
                     if features.get("zeek_lateral_moves", 0) > 0 and lateral_unique_targets >= lateral_evidence_threshold:
                         lateral_target_examples = features.get("zeek_lateral_target_examples", []) or []
                         lateral_evidence_target = lateral_target_examples[0] if lateral_target_examples else None
-                        self.evidence_store.add(Evidence(type="zeek_lateral_scan", source="zeek", timestamp=now, device=dev_id, value=features["zeek_lateral_moves"], confidence=0.9, independence_group="zeek_network", provenance="detector:zeek:lateral_scan", domain=lateral_evidence_target,
+                        self.evidence_store.add(Evidence(type="zeek_lateral_scan", source="zeek", timestamp=now, device=dev_id, value=features["zeek_lateral_moves"], confidence=0.9, provenance="detector:zeek:lateral_scan", domain=lateral_evidence_target,
                                                          targets=tuple(lateral_target_examples), target_count=lateral_unique_targets))
 
                     # BUGFIX (reviewer suggestion, implemented): a device's own real-time
@@ -2119,7 +2108,6 @@ class EnginePipeline:
                         self.evidence_store.add(Evidence(
                             type="local_device_discovery", source="zeek", timestamp=now, device=dev_id,
                             value=float(local_discovery_hits), confidence=0.7,
-                            independence_group="local_context",
                             provenance="detector:zeek:local_device_discovery",
                         ))
                 
@@ -2197,7 +2185,6 @@ class EnginePipeline:
                             device=dev_id,
                             value=reputation_value,
                             confidence=0.95 if reputation_value >= 4.0 else 0.8,
-                            independence_group="reputation",
                             provenance="detector:reputation",
                             domain=reputation_target if reputation_target and reputation_target != "unknown" else None,
                         ))
@@ -2278,8 +2265,9 @@ class EnginePipeline:
                         # device doing its own DNS-resolver traffic (e.g. Pi-hole/unbound's own
                         # recursive resolution to upstream root/TLD/authoritative servers) is not
                         # "policy bypass," it's that device's normal job.
-                        noisy_types = {"ml_anomaly", "dns_rate", "dns_entropy", "dns_unique_ratio", "zeek_network", "lan_recon", "dns_evasion_anomaly"}
-                        active_evidence = [ev for ev in active_evidence if ev.type not in noisy_types and ev.independence_group not in noisy_types]
+                        # W-13 (2026-10-14): by evidence TYPE (evidence.py SAFE_DEVICE_DAMPENED_TYPES -- exactly what the old
+                        # group-name filter dropped); the second family vocabulary the old filter read no longer exists.
+                        active_evidence = [ev for ev in active_evidence if ev.type not in SAFE_DEVICE_DAMPENED_TYPES]
 
                     # PHASE 1 FIX (device-sensitivity source): only dampen the new Phase-1
                     # behavioral evidence for devices whose infra classification came from an
@@ -2325,25 +2313,18 @@ class EnginePipeline:
                     # The argus engine (argus/ops/live_engine.py: evidence graph, hypotheses, decision) makes
                     # the decision. If it raises, the cycle is "not evaluated" (no action) and reported to the
                     # health manager -- there is no second engine.
-                    decision = argus_live_engine.evaluate(
+                    decision, evaluated_cycle = argus_live_engine.evaluate_cycle(
                         active_evidence, rep_vector, getattr(state, "device_type", ""), baseline_familiarity,
-                        features=features, is_safe=is_safe,
+                        features=features, is_safe=is_ip_verified_safe,
                         device_id=dev_id, now=now, geoip_engine=self.geoip_engine,
+                        sources=self.source_availability.snapshot(now),   # what was available for this verdict
                     )
 
-                    # PHASE 7 (16-parameter autonomy plan, Documentation/
-                    # ARGUS_AUTONOMY_DEPENDENCY_MAP.md): shadow-test at most one
-                    # currently-in-canary autotune candidate against this exact cycle's
-                    # real inputs, using the SAME real decision's own state as the
-                    # agreement baseline. Compute-only, best-effort -- never raises, never
-                    # emits an alert/mitigation (see argus/shadow/sandbox.py's module
-                    # docstring for how that's guaranteed), and has zero effect on the
-                    # `decision` this cycle actually acts on below.
-                    argus_live_engine.maybe_shadow_evaluate(
-                        active_evidence, rep_vector, getattr(state, "device_type", ""), baseline_familiarity,
-                        features=features, is_safe=is_safe, device_id=dev_id,
-                        real_state=decision["state"], now=now,
-                    )
+                    # PHASE 7 (16-parameter autonomy plan, Documentation/ARGUS_AUTONOMY_DEPENDENCY_MAP.md): shadow-test
+                    # at most one in-canary autotune candidate by re-deciding THIS cycle's gathered facts (U7: the pure
+                    # decide stage -- no second gather, no learner, graph or bookkeeping touched), against the real
+                    # decision's state. Best-effort, never raises, never alerts or contains.
+                    argus_live_engine.maybe_shadow_evaluate(evaluated_cycle, real_state=decision["state"], now=now)
 
                     # VERSION 11 (P1, review #9/#10): per-device learned behavioral baseline.
                     # Deliberately gated on the HEE's OWN verdict for THIS cycle being
@@ -2373,9 +2354,25 @@ class EnginePipeline:
                     if self.ml_registry and dev_id in all_active_ids and not is_poisoned:
                         self.ml_registry.learn(dev_id, features)
 
+                    # U4 (2026-10-14): both C2-beacon checks (dns_features) need "domain not in seen_domains". Adding every
+                    # rolling-window domain every cycle, whatever the verdict, made a new domain "seen" after its first
+                    # cycle, so it could never be flagged as a beacon (and a beaconing host taught the baseline its own C2).
+                    # A domain is learned only from a BENIGN/ANOMALOUS cycle and only once first seen longer ago than the
+                    # beacon look-back (1 h, the long window in dns_features).
+                    # INTERIM (redo: P3b persisted harmless memory, per-detector look-back; MASTER_TODO 0d register).
                     if hasattr(state, "rolling") and hasattr(state.rolling, "domains"):
+                        _first_seen = state.domain_first_seen
+                        _learn = decision["state"] in (DecisionState.BENIGN, DecisionState.ANOMALOUS)
                         for d in state.rolling.domains.keys():
-                            state.seen_domains.add(d)
+                            if d in state.seen_domains:
+                                state.seen_domains.add(d)       # keeps the LRU recency the old every-cycle add gave
+                                continue
+                            _t0 = _first_seen.setdefault(d, now)
+                            if _learn and now - _t0 >= 3600.0:
+                                state.seen_domains.add(d)
+                                del _first_seen[d]
+                        while len(_first_seen) > 10000:        # oldest first sightings go first (insertion order)
+                            del _first_seen[next(iter(_first_seen))]
 
                     # PHASE 6: union destination IPs contacted from every known address of this device.
                     dest_ips = self.zeek_fx.get_dest_ips(known_ips_snapshot)
@@ -2435,20 +2432,17 @@ class EnginePipeline:
                                             geofencing_evidence_item = Evidence(type="geofencing_violation", source="geoip", timestamp=now, device=dev_id, value=10.0, confidence=1.0, provenance=f"Blocklisted Country: {country_code}", domain=d_ip)
                                             active_evidence.append(geofencing_evidence_item)
                                             geofencing_evidence_this_cycle.append(geofencing_evidence_item)
-                                            # Force re-evaluate decision (V13 FAST CUTOVER: same engine
-                                            # selection as the main call site above, kept consistent).
-                                            # Deliberately NOT passed device_id/now here (Phase 1, argus
-                                            # full-architecture plan): argus's evidence/ingest.py assigns
-                                            # a FRESH evidence_id on every convert() call, no dedup by
-                                            # content -- since `active_evidence` here is the SAME list
-                                            # already converted+written once by the main call site above
-                                            # (plus one new geofencing_violation item), passing device_id
-                                            # would re-insert every one of those items again as genuine
-                                            # duplicate graph rows. This second, rare re-evaluation path
-                                            # stays graph-uninvolved until that's worth solving properly.
-                                            decision = argus_live_engine.evaluate(
-                                                active_evidence, rep_vector, getattr(state, "device_type", ""),
-                                                                    )
+                                            # Re-decide with the geofencing item, in the SAME context as the main
+                                            # decision: the cycle's own gathered facts (graph history, derived
+                                            # signals, baselines, features, familiarity) through the pure decide() --
+                                            # nothing gathered again, nothing written here (the supplementary row is
+                                            # written after the loop). It used to call evaluate() with no device id,
+                                            # features or familiarity, so this decision saw none of that.
+                                            # A cycle that was not evaluated (engine error) keeps its decision.
+                                            _redecision = argus_live_engine.redecide_with_evidence(
+                                                evaluated_cycle, geofencing_evidence_this_cycle)
+                                            if _redecision is not None:
+                                                decision = _redecision
                                             risk = decision["threat_confidence"] * 10.0
                                             factors = [{"name": decision["explanation"], "score": risk}]
                                 
@@ -2654,6 +2648,7 @@ class EnginePipeline:
                             # Containment this alert causes (graph action ids), linked to its alert_event below (W-10).
                             _containment_actions: List[str] = []
                             _pending_domain_action_id: Optional[str] = None   # a domain block awaiting a person
+                            _device_approval_pending = False   # router isolation / tarpit queued for a person (U1)
 
                             alert_payload = {
                                 "type": "ids_alert",
@@ -2711,6 +2706,9 @@ class EnginePipeline:
                                 # encode this system's own prior verdict, not a raw observation).
                                 "hee_hypotheses": decision.get("hypotheses", {}),
                                 "hee_independent_sources": decision.get("independent_sources", 0),
+                                # which sources were available when this was decided (ok / degraded / unavailable /
+                                # disabled): a verdict made with the feeds down is a different fact (P0 capability registry)
+                                "hee_sources": dict(decision.get("_sources") or {}),
                                 "hee_decision_path": decision.get("decision_path", ""),
                                 # BUGFIX (live audit, 2026-09-09, third-party ChatGPT review):
                                 # these were ALWAYS computed from active_evidence alone --
@@ -2730,9 +2728,8 @@ class EnginePipeline:
                                 # argus/decision/engine.py's attack_evidence (e.g. local_context/
                                 # novelty_context families, deliberately excluded there) are never
                                 # lost -- purely additive, can only ADD what was missing.
-                                "hee_evidence_families": sorted({
-                                    ev.independence_group for ev in active_evidence if ev.independence_group
-                                } | set(decision.get("evidence_families", []))),
+                                "hee_evidence_families": evidence_families_for_alert(
+                                    active_evidence, decision.get("evidence_families", [])),
                                 # PHASE 58: the actual Evidence.type names present (not just
                                 # their coarser independence_group families) -- needed because
                                 # family granularity is too coarse for ai_soc.py's attack-shaped-
@@ -2961,20 +2958,6 @@ class EnginePipeline:
                             else:
                                 # Real threat or low-confidence alert -> execute IPS containment & publish Telegram
                                 containment_status = "🔓 UNBLOCKED / ACTIVE (Monitoring Only)"
-                                # BUGFIX: found via a live third-party review of a real tarpit alert --
-                                # this authorizes Layer-2 tarpit containment (bypassing the normal
-                                # risk>=9.0 floor entirely), but zeek_lateral_moves is a raw connection
-                                # COUNT, so a single ordinary SMB/SSH/RDP connection to one internal
-                                # device satisfied `> 0` identically to a genuine multi-target scan --
-                                # confirmed live: zeek_lateral_moves=1 alone triggered tarpit. Same fix
-                                # as the CL-AFPE's Stage-1 Check 2 -- require a genuine distinct-target
-                                # count, not just "at least one connection happened."
-                                lateral_targets_count = int(features.get("zeek_lateral_unique_targets", 0) or 0)
-                                lateral_threshold = int(self.config.get("lateral_movement_unique_targets_threshold", 2))
-                                lateral_threat = (
-                                    (features.get("zeek_lateral_moves", 0) > 0 and lateral_targets_count >= lateral_threshold)
-                                    or features.get("zeek_honeypot_hits", 0) > 0
-                                )
                                 # PHASE 19 FIX: decision["state"] alone can no longer be trusted here --
                                 # it reads HIGH both when argus/decision/engine.py itself found >=2 genuinely
                                 # independent corroborating sources, AND when the escalation block above
@@ -2987,6 +2970,13 @@ class EnginePipeline:
                                 containment_decision_state = decision.get("state", "SUSPICIOUS")
                                 if decision.get("escalated_via_persistence"):
                                     containment_decision_state = DecisionState.SUSPICIOUS
+                                # U1 (2026-10-14): what the decision allows, from ONE gate (mitigation/containment_gate.py):
+                                # corroborated HIGH/CRITICAL (>= 2 independent sources, not persistence-escalated) or an
+                                # owner-named single-signal exception (honeypot, ARP spoofing, verified feed IOC). Window
+                                # counts -- lateral moves, honeypot hits in the feature window -- no longer authorise
+                                # containment on their own (the old `lateral_threat` did, on any alert, bypassing the risk
+                                # floor, the release cooldown and every approval); lateral movement still feeds the decision.
+                                containment_auth = authorize_containment(decision)
                                 if self.ips_mitigator:
                                     # BUGFIX: use alert_target_domain (the evidence-corrected domain,
                                     # see its own comment above), not the raw target_malicious_domain
@@ -2997,7 +2987,7 @@ class EnginePipeline:
                                         st=state,
                                         target_domain=alert_target_domain,
                                         risk_score=risk,
-                                        lateral_threat=lateral_threat,
+                                        authorization=containment_auth,
                                         # SECURITY FIX (P2-1): full autonomous-containment immunity
                                         # (and auto-release of already-active tarpit/router isolation)
                                         # must require the operator-verified is_ip_verified_safe, not
@@ -3007,7 +2997,6 @@ class EnginePipeline:
                                         ti_engine=self.ti_engine,
                                         reason=primary_sig,
                                         fp_verdict=fp_verdict,
-                                        decision_state=containment_decision_state,
                                         # recorded with every block / isolation this call creates (2026-10-12)
                                         alert_ref={"incident_id": incident_id, "signature": primary_sig_base,
                                                    "target_source": _alert_target.source,
@@ -3015,6 +3004,7 @@ class EnginePipeline:
                                                                             | set(decision.get("evidence_types", [])))},
                                     ) or {}
                                     _containment_actions = list(_mit_result.get("actions") or [])
+                                    _device_approval_pending = bool(_mit_result.get("pending_device_containment"))
                                     if _mit_result.get("pending_domain_block"):
                                         # interactive mode: the block waits for the operator's "Approve" (Telegram)
                                         _pending_domain_action_id = uuid.uuid4().hex[:10]
@@ -3062,9 +3052,8 @@ class EnginePipeline:
                                 # status to "WAITING FOR APPROVAL" purely because
                                 # interactive_blocking_enabled was on — with no check on whether
                                 # mitigate() actually had anything pending. mitigate()'s own
-                                # interactive-mode branches (ips.py:344,362) are only even
-                                # reachable when risk_score >= 8.5 (router) or lateral_threat is
-                                # true — below that, mitigate() does nothing and "UNBLOCKED" is
+                                # interactive-mode branches are only even reachable above
+                                # its severity floors — below that, mitigate() does nothing and "UNBLOCKED" is
                                 # just the correct, final status, not a placeholder. A SUSPICIOUS/
                                 # monitor alert at risk=4.5 was getting relabeled "Action Required"
                                 # with live approval buttons even though nothing was ever
@@ -3085,30 +3074,11 @@ class EnginePipeline:
                                 # stops the honeypot hard-stop from firing on safe_ips devices at
                                 # all going forward; this fix covers every OTHER hard-stop/HIGH
                                 # path that could still reach this same contradiction.
-                                # SECURITY FIX (P0-2): ips.py's mitigate() now also holds back
-                                # autonomous router isolation/tarpit -- regardless of
-                                # interactive_blocking_enabled -- for CRITICAL_DEVICE_TYPES
-                                # (router/gateway/nas/smart_tv), so a heuristic false positive
-                                # can't fully isolate a household's core infrastructure with zero
-                                # human gate. Without also recognizing that hold here, a critical
-                                # device on the (default) interactive_blocking_enabled=False config
-                                # would show a silent "UNBLOCKED" status with no approval button --
-                                # nothing autonomously protecting it AND no way to act on it,
-                                # exactly the user-facing contradiction the PHASE 10 FIX above this
-                                # already exists to prevent for the other case. `not is_ip_verified_safe`,
-                                # not `not is_safe`: mitigate() itself now only early-returns (queuing
-                                # nothing) for the operator-verified is_ip_verified_safe -- see that
-                                # flag's own definition comment for why hostname-pattern-only safety
-                                # must not suppress this either.
-                                _hardware_approval_pending = (
-                                    (
-                                        bool(self.config.get("interactive_blocking_enabled", False))
-                                        or getattr(state, "device_type", "unknown") in CRITICAL_DEVICE_TYPES
-                                    )
-                                    and "UNBLOCKED" in containment_status
-                                    and (risk >= 8.5 or lateral_threat)
-                                    and not is_ip_verified_safe
-                                )
+                                # U1 (2026-10-14): "waiting for approval" is exactly what mitigate() queued for a person
+                                # (result["pending_device_containment"]) -- never re-derived here, so the label and the
+                                # buttons cannot drift from the containment decision (critical-role devices, interactive
+                                # mode, release cooldown all live in mitigation/containment_gate.py).
+                                _hardware_approval_pending = _device_approval_pending and "UNBLOCKED" in containment_status
                                 if _hardware_approval_pending or (_pending_domain_action_id and "UNBLOCKED" in containment_status):
                                     containment_status = "⏳ WAITING FOR APPROVAL (Action Required via Inline Buttons below)"
                                 # W-10: the persisted alert carries the containment outcome (it used to exist only in
@@ -3126,9 +3096,8 @@ class EnginePipeline:
                             # SUSPICIOUS, see the PHASE 19 comment above). A SUSPICIOUS/monitor-only
                             # decision still writes to alerts.json (line above, unconditional), still
                             # trains CL-AFPE, still shows in Grafana -- it just no longer pages the
-                            # operator. This does not touch mitigate() or the router/tarpit escalation
-                            # paths above, which already have their own independent risk_score/
-                            # lateral_threat gates unrelated to Telegram.
+                            # operator. This does not touch mitigate() or the router/tarpit paths above,
+                            # which have their own gate (mitigation/containment_gate.py) unrelated to Telegram.
                             telegram_worthy = containment_decision_state in (DecisionState.HIGH, DecisionState.CRITICAL)
 
                             # PHASE 21D trigger: even though a HIGH/CRITICAL decision already
@@ -3507,7 +3476,7 @@ class EnginePipeline:
                                     # this closes.
                                     hyp_destination_ids = frozenset(decision.get("hypothesis_destination_ids", []))
                                     for ev in active_evidence:
-                                        canonical_family = _canonical_evidence_family(ev.type, ev.independence_group)
+                                        canonical_family = _canonical_evidence_family(ev.type)
                                         _route_evidence_into_buckets(ev, canonical_family, grouped_evidence, context_evidence,
                                                                       hyp_destination_ids)
                                     # BUGFIX (live audit, 2026-09-09, real production alerts --
@@ -3550,7 +3519,6 @@ class EnginePipeline:
                                             type=we["evidence_type"], source="argus_live_engine", timestamp=now,
                                             device=dev_id, value=float(we.get("value") or 1.0),
                                             confidence=float(we.get("confidence") or 1.0),
-                                            independence_group=fam,
                                             # BUGFIX (live audit, 2026-09-09): provenance was never
                                             # carried through this bridge -- see decision/engine.py's
                                             # matching full_attack_evidence fix for the full incident.
@@ -3733,7 +3701,7 @@ class EnginePipeline:
                                     # BUGFIX (live audit, 2026-09-09): PEER_COHORT_DEVIATION's
                                     # evidence is device-level by design (destination_id=
                                     # NO_DESTINATION, live_engine.py's
-                                    # _inject_peer_deviation_evidence() -- "distinct
+                                    # _gather_peer_stats() -- "distinct
                                     # destination count" is a behavioral statistic about the
                                     # device, not any single connection), so target_display
                                     # was always "unknown" for this signature and "Contacted
@@ -3795,8 +3763,8 @@ class EnginePipeline:
                                         # "Lateral Scans" even when zeek_lateral_unique_targets was below the
                                         # SAME threshold (lateral_movement_unique_targets_threshold) that
                                         # gates whether this evidence is even allowed to exist / authorize
-                                        # containment (see the CL-AFPE Stage-1 Check 2 and this file's own
-                                        # lateral_threat gate) -- a single SMB/SSH/RDP connection to one
+                                        # containment (see the CL-AFPE Stage-1 Check 2; lateral movement no longer
+                                        # authorises containment on its own since U1) -- a single SMB/SSH/RDP connection to one
                                         # internal device (e.g. browsing a NAS share) isn't a scan, and
                                         # calling it one here contradicted the decision the system actually
                                         # made. One shared threshold for display and containment now, so

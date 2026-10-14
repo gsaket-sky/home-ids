@@ -66,7 +66,7 @@ NOW = time.time()
 
 def _dns_rate_ev(value):
     return Evidence(type="dns_rate", source="pihole", timestamp=NOW, device="d1",
-                     value=value, confidence=0.9, independence_group="dns_behavior")
+                     value=value, confidence=0.9)
 
 check("BACKWARD-COMPAT: an existing hypothesis's evaluate() still works when called "
       "with the old 2-arg form (device_type omitted entirely)",
@@ -99,7 +99,7 @@ check("REGRESSION GUARD: an empty device_type (unknown/legacy state) behaves exa
 
 def _dga_ev(value):
     return Evidence(type="dns_dga_burst", source="threat_signals", timestamp=NOW, device="d1",
-                     value=value, confidence=0.6, independence_group="dns_behavior")
+                     value=value, confidence=0.6)
 
 # MITIGATION (found and fixed before this hypothesis was ever committed -- see the
 # PROJECT_SYNC_LOG.md entry): DeviceProfileBenignHypothesis must never outscore a

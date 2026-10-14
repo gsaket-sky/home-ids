@@ -774,7 +774,7 @@ class PeerDeviationHypothesis(Hypothesis):
     generalizing the SAME cross-device-query mechanism Phase 1a/N4 already
     proved out to a peer-COMPARISON question rather than a peer-CORROBORATION
     one. `peer_deviation` evidence is synthesized per-cycle by
-    argus/ops/live_engine.py's _inject_peer_deviation_evidence() from a
+    argus/ops/live_engine.py's _gather_peer_stats() from a
     device_type-grouped distinct-destination-count comparison, never written
     back to the graph itself (derived context, same principle as every other
     Phase 1a/N4 synthetic signal).
@@ -866,18 +866,35 @@ HYPOTHESIS_ANCHOR_EVIDENCE_TYPES: Dict[str, FrozenSet[str]] = {
 
 
 class HypothesisEngine:
+    """The registered hypotheses, evaluated per call.
+
+    A hypothesis instance carries scratch state from its last evaluation (required_satisfied, the three scores, and for
+    some its own `name`), and the engine used to write the autotuned familiarity trust bar onto the shared instance and
+    never reset it. One instance per hypothesis for the life of the process therefore made decide() pure only for a single
+    thread, and let a call see the previous call's trust bar. evaluate_all() now builds its own instances (the registered
+    CLASSES are the registry): nothing survives a call, and concurrent calls -- parallel challenger evaluation, console/API
+    threads -- cannot touch each other. The 14 constructors are trivial (measured 2026-10-14: ~15 microseconds per call).
+    """
+    _ATTACK_CLASSES = (
+        DNSTunnelingHypothesis, NetworkIntrusionHypothesis, DGAHypothesis, ExfiltrationHypothesis,
+        BeaconingHypothesis, DNSTunnelingV2Hypothesis, ConnectionAbuseHypothesis, DNSEvasionHypothesis,
+        SuricataSignatureHypothesis, CoordinatedTargetingHypothesis, PeerDeviationHypothesis,
+    )
+    _BENIGN_CLASSES = (AdvertisingBurstHypothesis, LocalDeviceDiscoveryHypothesis, DeviceProfileBenignHypothesis)
+
     def __init__(self):
-        self.attack_hypotheses: List[Hypothesis] = [
-            DNSTunnelingHypothesis(), NetworkIntrusionHypothesis(),
-            DGAHypothesis(), ExfiltrationHypothesis(), BeaconingHypothesis(),
-            DNSTunnelingV2Hypothesis(), ConnectionAbuseHypothesis(),
-            DNSEvasionHypothesis(), SuricataSignatureHypothesis(),
-            CoordinatedTargetingHypothesis(), PeerDeviationHypothesis(),
-        ]
-        self.benign_hypotheses: List[Hypothesis] = [
-            AdvertisingBurstHypothesis(), LocalDeviceDiscoveryHypothesis(),
-            DeviceProfileBenignHypothesis(),
-        ]
+        self._attack_classes = tuple(self._ATTACK_CLASSES)
+        self._benign_classes = tuple(self._BENIGN_CLASSES)
+
+    @property
+    def attack_hypotheses(self) -> List[Hypothesis]:
+        """Fresh instances of the registered attack hypotheses (introspection: what is registered). Never the instances
+        that decided a call, and not replaceable on an instance."""
+        return [cls() for cls in self._attack_classes]
+
+    @property
+    def benign_hypotheses(self) -> List[Hypothesis]:
+        return [cls() for cls in self._benign_classes]
 
     def evaluate_all(self, evidence_list: List[Evidence], rep_vector, device_type: str = "",
                        baseline_familiarity: float = 0.0, now: Optional[float] = None,
@@ -900,14 +917,17 @@ class HypothesisEngine:
         call convention."""
         ev_store = score_evidence(evidence_list, now=now)
 
+        # this call's own instances (see the class docstring)
+        attack_hypotheses = self.attack_hypotheses
+        benign_hypotheses = self.benign_hypotheses
         if familiarity_trust_bar is not None:
-            for h in self.benign_hypotheses:
+            for h in benign_hypotheses:
                 if isinstance(h, DeviceProfileBenignHypothesis):
                     h.FAMILIARITY_TRUST_BAR = familiarity_trust_bar
 
         best_attack = None
         best_attack_score = 0.0
-        for h in self.attack_hypotheses:
+        for h in attack_hypotheses:
             score = h.evaluate(ev_store, rep_vector, device_type, baseline_familiarity)
             if score > best_attack_score:
                 best_attack_score = score
@@ -915,7 +935,7 @@ class HypothesisEngine:
 
         best_benign = None
         best_benign_score = 0.0
-        for h in self.benign_hypotheses:
+        for h in benign_hypotheses:
             score = h.evaluate(ev_store, rep_vector, device_type, baseline_familiarity)
             if score > best_benign_score:
                 best_benign_score = score

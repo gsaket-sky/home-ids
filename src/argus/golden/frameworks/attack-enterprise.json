@@ -1,0 +1,2598 @@
+{
+ "rule": "detected by a detection strategy with an analytic reading a network data component (DC0078, DC0082, DC0085, DC0102); sensor_sourced = that analytic names a passive network sensor log",
+ "source": {
+  "collection": "enterprise-attack",
+  "framework": "MITRE ATT&CK",
+  "sha256": "81113ba98afa2928f3dcff62022539f7ce30c315c32e14422f11ff95ce534352",
+  "url": "https://github.com/mitre-attack/attack-stix-data/blob/master/enterprise-attack/enterprise-attack-20.0.json",
+  "version": "20.0"
+ },
+ "techniques": [
+  {
+   "detection_strategies": [
+    "DET0053"
+   ],
+   "id": "T1001",
+   "name": "Data Obfuscation",
+   "sensor_sourced": true,
+   "tactics": [
+    "command-and-control"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0011"
+   ],
+   "id": "T1001.001",
+   "name": "Junk Data",
+   "sensor_sourced": true,
+   "tactics": [
+    "command-and-control"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0235"
+   ],
+   "id": "T1001.002",
+   "name": "Steganography",
+   "sensor_sourced": true,
+   "tactics": [
+    "command-and-control"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0470"
+   ],
+   "id": "T1001.003",
+   "name": "Protocol or Service Impersonation",
+   "sensor_sourced": true,
+   "tactics": [
+    "command-and-control"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0594"
+   ],
+   "id": "T1003.006",
+   "name": "DCSync",
+   "sensor_sourced": true,
+   "tactics": [
+    "credential-access"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0499"
+   ],
+   "id": "T1008",
+   "name": "Fallback Channels",
+   "sensor_sourced": true,
+   "tactics": [
+    "command-and-control"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0077"
+   ],
+   "id": "T1011",
+   "name": "Exfiltration Over Other Network Medium",
+   "sensor_sourced": true,
+   "tactics": [
+    "exfiltration"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0554"
+   ],
+   "id": "T1011.001",
+   "name": "Exfiltration Over Bluetooth",
+   "sensor_sourced": false,
+   "tactics": [
+    "exfiltration"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0357"
+   ],
+   "id": "T1016.001",
+   "name": "Internet Connection Discovery",
+   "sensor_sourced": false,
+   "tactics": [
+    "discovery"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0574"
+   ],
+   "id": "T1018",
+   "name": "Remote System Discovery",
+   "sensor_sourced": false,
+   "tactics": [
+    "discovery"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0397"
+   ],
+   "id": "T1020",
+   "name": "Automated Exfiltration",
+   "sensor_sourced": true,
+   "tactics": [
+    "exfiltration"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0403"
+   ],
+   "id": "T1020.001",
+   "name": "Traffic Duplication",
+   "sensor_sourced": true,
+   "tactics": [
+    "exfiltration"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0269"
+   ],
+   "id": "T1021",
+   "name": "Remote Services",
+   "sensor_sourced": false,
+   "tactics": [
+    "lateral-movement"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0327"
+   ],
+   "id": "T1021.001",
+   "name": "Remote Desktop Protocol",
+   "sensor_sourced": false,
+   "tactics": [
+    "lateral-movement"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0530"
+   ],
+   "id": "T1021.002",
+   "name": "SMB/Windows Admin Shares",
+   "sensor_sourced": false,
+   "tactics": [
+    "lateral-movement"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0285"
+   ],
+   "id": "T1021.003",
+   "name": "Distributed Component Object Model",
+   "sensor_sourced": false,
+   "tactics": [
+    "lateral-movement"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0596"
+   ],
+   "id": "T1021.004",
+   "name": "SSH",
+   "sensor_sourced": true,
+   "tactics": [
+    "lateral-movement"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0178"
+   ],
+   "id": "T1021.005",
+   "name": "VNC",
+   "sensor_sourced": true,
+   "tactics": [
+    "lateral-movement"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0477"
+   ],
+   "id": "T1021.006",
+   "name": "Windows Remote Management",
+   "sensor_sourced": true,
+   "tactics": [
+    "lateral-movement"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0378"
+   ],
+   "id": "T1027",
+   "name": "Obfuscated Files or Information",
+   "sensor_sourced": false,
+   "tactics": [
+    "stealth"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0119"
+   ],
+   "id": "T1027.003",
+   "name": "Steganography",
+   "sensor_sourced": false,
+   "tactics": [
+    "stealth"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0501"
+   ],
+   "id": "T1027.004",
+   "name": "Compile After Delivery",
+   "sensor_sourced": true,
+   "tactics": [
+    "stealth"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0313"
+   ],
+   "id": "T1027.006",
+   "name": "HTML Smuggling",
+   "sensor_sourced": true,
+   "tactics": [
+    "stealth"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0019"
+   ],
+   "id": "T1027.008",
+   "name": "Stripped Payloads",
+   "sensor_sourced": true,
+   "tactics": [
+    "stealth"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0405"
+   ],
+   "id": "T1027.012",
+   "name": "LNK Icon Smuggling",
+   "sensor_sourced": false,
+   "tactics": [
+    "stealth"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0087"
+   ],
+   "id": "T1027.013",
+   "name": "Encrypted/Encoded File",
+   "sensor_sourced": false,
+   "tactics": [
+    "stealth"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0510"
+   ],
+   "id": "T1027.017",
+   "name": "SVG Smuggling",
+   "sensor_sourced": true,
+   "tactics": [
+    "stealth"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0920"
+   ],
+   "id": "T1027.018",
+   "name": "Invisible Unicode",
+   "sensor_sourced": true,
+   "tactics": [
+    "stealth"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0399"
+   ],
+   "id": "T1029",
+   "name": "Scheduled Transfer",
+   "sensor_sourced": true,
+   "tactics": [
+    "exfiltration"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0213"
+   ],
+   "id": "T1030",
+   "name": "Data Transfer Size Limits",
+   "sensor_sourced": true,
+   "tactics": [
+    "exfiltration"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0898"
+   ],
+   "id": "T1036.012",
+   "name": "Browser Fingerprint",
+   "sensor_sourced": true,
+   "tactics": [
+    "stealth"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0367"
+   ],
+   "id": "T1037.003",
+   "name": "Network Logon Script",
+   "sensor_sourced": false,
+   "tactics": [
+    "persistence",
+    "privilege-escalation"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0410"
+   ],
+   "id": "T1039",
+   "name": "Data from Network Shared Drive",
+   "sensor_sourced": false,
+   "tactics": [
+    "collection"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0314"
+   ],
+   "id": "T1040",
+   "name": "Network Sniffing",
+   "sensor_sourced": false,
+   "tactics": [
+    "credential-access",
+    "discovery"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0348"
+   ],
+   "id": "T1041",
+   "name": "Exfiltration Over C2 Channel",
+   "sensor_sourced": true,
+   "tactics": [
+    "exfiltration"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0376"
+   ],
+   "id": "T1046",
+   "name": "Network Service Discovery",
+   "sensor_sourced": true,
+   "tactics": [
+    "discovery"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0364"
+   ],
+   "id": "T1047",
+   "name": "Windows Management Instrumentation",
+   "sensor_sourced": false,
+   "tactics": [
+    "execution"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0131"
+   ],
+   "id": "T1048",
+   "name": "Exfiltration Over Alternative Protocol",
+   "sensor_sourced": true,
+   "tactics": [
+    "exfiltration"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0503"
+   ],
+   "id": "T1048.001",
+   "name": "Exfiltration Over Symmetric Encrypted Non-C2 Protocol",
+   "sensor_sourced": true,
+   "tactics": [
+    "exfiltration"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0512"
+   ],
+   "id": "T1048.002",
+   "name": "Exfiltration Over Asymmetric Encrypted Non-C2 Protocol",
+   "sensor_sourced": true,
+   "tactics": [
+    "exfiltration"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0149"
+   ],
+   "id": "T1048.003",
+   "name": "Exfiltration Over Unencrypted Non-C2 Protocol",
+   "sensor_sourced": true,
+   "tactics": [
+    "exfiltration"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0320"
+   ],
+   "id": "T1049",
+   "name": "System Network Connections Discovery",
+   "sensor_sourced": false,
+   "tactics": [
+    "discovery"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0206"
+   ],
+   "id": "T1053.007",
+   "name": "Container Orchestration Job",
+   "sensor_sourced": false,
+   "tactics": [
+    "execution",
+    "persistence",
+    "privilege-escalation"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0102"
+   ],
+   "id": "T1056",
+   "name": "Input Capture",
+   "sensor_sourced": true,
+   "tactics": [
+    "collection",
+    "credential-access"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0089"
+   ],
+   "id": "T1056.001",
+   "name": "Keylogging",
+   "sensor_sourced": true,
+   "tactics": [
+    "collection",
+    "credential-access"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0480"
+   ],
+   "id": "T1056.003",
+   "name": "Web Portal Capture",
+   "sensor_sourced": true,
+   "tactics": [
+    "collection",
+    "credential-access"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0384"
+   ],
+   "id": "T1059.004",
+   "name": "Unix Shell",
+   "sensor_sourced": true,
+   "tactics": [
+    "execution"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0063"
+   ],
+   "id": "T1059.006",
+   "name": "Python",
+   "sensor_sourced": false,
+   "tactics": [
+    "execution"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0142"
+   ],
+   "id": "T1059.008",
+   "name": "Network Device CLI",
+   "sensor_sourced": true,
+   "tactics": [
+    "execution"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0360"
+   ],
+   "id": "T1069.002",
+   "name": "Domain Groups",
+   "sensor_sourced": true,
+   "tactics": [
+    "discovery"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0103"
+   ],
+   "id": "T1070.005",
+   "name": "Network Share Connection Removal",
+   "sensor_sourced": true,
+   "tactics": [
+    "stealth"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0049"
+   ],
+   "id": "T1070.007",
+   "name": "Clear Network Connection History and Configurations",
+   "sensor_sourced": true,
+   "tactics": [
+    "stealth"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0444"
+   ],
+   "id": "T1071",
+   "name": "Application Layer Protocol",
+   "sensor_sourced": true,
+   "tactics": [
+    "command-and-control"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0027"
+   ],
+   "id": "T1071.001",
+   "name": "Web Protocols",
+   "sensor_sourced": true,
+   "tactics": [
+    "command-and-control"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0416"
+   ],
+   "id": "T1071.002",
+   "name": "File Transfer Protocols",
+   "sensor_sourced": true,
+   "tactics": [
+    "command-and-control"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0135"
+   ],
+   "id": "T1071.003",
+   "name": "Mail Protocols",
+   "sensor_sourced": true,
+   "tactics": [
+    "command-and-control"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0400"
+   ],
+   "id": "T1071.004",
+   "name": "DNS",
+   "sensor_sourced": true,
+   "tactics": [
+    "command-and-control"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0002"
+   ],
+   "id": "T1071.005",
+   "name": "Publish/Subscribe Protocols",
+   "sensor_sourced": true,
+   "tactics": [
+    "command-and-control"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0223"
+   ],
+   "id": "T1072",
+   "name": "Software Deployment Tools",
+   "sensor_sourced": true,
+   "tactics": [
+    "execution",
+    "lateral-movement"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0071"
+   ],
+   "id": "T1074.002",
+   "name": "Remote Data Staging",
+   "sensor_sourced": true,
+   "tactics": [
+    "collection"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0210"
+   ],
+   "id": "T1078.002",
+   "name": "Domain Accounts",
+   "sensor_sourced": false,
+   "tactics": [
+    "initial-access",
+    "persistence",
+    "privilege-escalation",
+    "stealth"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0471"
+   ],
+   "id": "T1080",
+   "name": "Taint Shared Content",
+   "sensor_sourced": true,
+   "tactics": [
+    "lateral-movement"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0129"
+   ],
+   "id": "T1087.002",
+   "name": "Domain Account",
+   "sensor_sourced": true,
+   "tactics": [
+    "discovery"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0445"
+   ],
+   "id": "T1090",
+   "name": "Proxy",
+   "sensor_sourced": true,
+   "tactics": [
+    "command-and-control"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0075"
+   ],
+   "id": "T1090.001",
+   "name": "Internal Proxy",
+   "sensor_sourced": true,
+   "tactics": [
+    "command-and-control"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0325"
+   ],
+   "id": "T1090.002",
+   "name": "External Proxy",
+   "sensor_sourced": true,
+   "tactics": [
+    "command-and-control"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0359"
+   ],
+   "id": "T1090.003",
+   "name": "Multi-hop Proxy",
+   "sensor_sourced": true,
+   "tactics": [
+    "command-and-control"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0196"
+   ],
+   "id": "T1090.004",
+   "name": "Domain Fronting",
+   "sensor_sourced": true,
+   "tactics": [
+    "command-and-control"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0457"
+   ],
+   "id": "T1095",
+   "name": "Non-Application Layer Protocol",
+   "sensor_sourced": true,
+   "tactics": [
+    "command-and-control"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0425"
+   ],
+   "id": "T1102",
+   "name": "Web Service",
+   "sensor_sourced": true,
+   "tactics": [
+    "command-and-control"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0058"
+   ],
+   "id": "T1102.001",
+   "name": "Dead Drop Resolver",
+   "sensor_sourced": true,
+   "tactics": [
+    "command-and-control"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0035"
+   ],
+   "id": "T1102.002",
+   "name": "Bidirectional Communication",
+   "sensor_sourced": true,
+   "tactics": [
+    "command-and-control"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0581"
+   ],
+   "id": "T1102.003",
+   "name": "One-Way Communication",
+   "sensor_sourced": false,
+   "tactics": [
+    "command-and-control"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0228"
+   ],
+   "id": "T1104",
+   "name": "Multi-Stage Channels",
+   "sensor_sourced": false,
+   "tactics": [
+    "command-and-control"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0060"
+   ],
+   "id": "T1105",
+   "name": "Ingress Tool Transfer",
+   "sensor_sourced": true,
+   "tactics": [
+    "command-and-control"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0476"
+   ],
+   "id": "T1114",
+   "name": "Email Collection",
+   "sensor_sourced": false,
+   "tactics": [
+    "collection"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0047"
+   ],
+   "id": "T1114.001",
+   "name": "Local Email Collection",
+   "sensor_sourced": false,
+   "tactics": [
+    "collection"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0048"
+   ],
+   "id": "T1114.002",
+   "name": "Remote Email Collection",
+   "sensor_sourced": false,
+   "tactics": [
+    "collection"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0197"
+   ],
+   "id": "T1125",
+   "name": "Video Capture",
+   "sensor_sourced": true,
+   "tactics": [
+    "collection"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0172"
+   ],
+   "id": "T1127",
+   "name": "Trusted Developer Utilities Proxy Execution",
+   "sensor_sourced": false,
+   "tactics": [
+    "execution",
+    "stealth"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0556"
+   ],
+   "id": "T1127.001",
+   "name": "MSBuild",
+   "sensor_sourced": false,
+   "tactics": [
+    "execution",
+    "stealth"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0585"
+   ],
+   "id": "T1127.003",
+   "name": "JamPlus",
+   "sensor_sourced": false,
+   "tactics": [
+    "execution",
+    "stealth"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0018"
+   ],
+   "id": "T1129",
+   "name": "Shared Modules",
+   "sensor_sourced": true,
+   "tactics": [
+    "execution"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0108"
+   ],
+   "id": "T1132",
+   "name": "Data Encoding",
+   "sensor_sourced": true,
+   "tactics": [
+    "command-and-control"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0124"
+   ],
+   "id": "T1132.001",
+   "name": "Standard Encoding",
+   "sensor_sourced": true,
+   "tactics": [
+    "command-and-control"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0326"
+   ],
+   "id": "T1132.002",
+   "name": "Non-Standard Encoding",
+   "sensor_sourced": true,
+   "tactics": [
+    "command-and-control"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0354"
+   ],
+   "id": "T1133",
+   "name": "External Remote Services",
+   "sensor_sourced": true,
+   "tactics": [
+    "initial-access",
+    "persistence"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0182"
+   ],
+   "id": "T1135",
+   "name": "Network Share Discovery",
+   "sensor_sourced": true,
+   "tactics": [
+    "discovery"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0092"
+   ],
+   "id": "T1176",
+   "name": "Software Extensions",
+   "sensor_sourced": true,
+   "tactics": [
+    "persistence"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0044"
+   ],
+   "id": "T1176.001",
+   "name": "Browser Extensions",
+   "sensor_sourced": true,
+   "tactics": [
+    "persistence"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0561"
+   ],
+   "id": "T1176.002",
+   "name": "IDE Extensions",
+   "sensor_sourced": true,
+   "tactics": [
+    "persistence"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0507"
+   ],
+   "id": "T1185",
+   "name": "Browser Session Hijacking",
+   "sensor_sourced": false,
+   "tactics": [
+    "collection"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0022"
+   ],
+   "id": "T1187",
+   "name": "Forced Authentication",
+   "sensor_sourced": true,
+   "tactics": [
+    "credential-access"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0176"
+   ],
+   "id": "T1189",
+   "name": "Drive-by Compromise",
+   "sensor_sourced": true,
+   "tactics": [
+    "initial-access"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0080"
+   ],
+   "id": "T1190",
+   "name": "Exploit Public-Facing Application",
+   "sensor_sourced": true,
+   "tactics": [
+    "initial-access"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0537"
+   ],
+   "id": "T1195",
+   "name": "Supply Chain Compromise",
+   "sensor_sourced": true,
+   "tactics": [
+    "initial-access"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0009"
+   ],
+   "id": "T1195.001",
+   "name": "Compromise Software Dependencies and Development Tools",
+   "sensor_sourced": true,
+   "tactics": [
+    "initial-access"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0309"
+   ],
+   "id": "T1195.002",
+   "name": "Compromise Software Supply Chain",
+   "sensor_sourced": true,
+   "tactics": [
+    "initial-access"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0098"
+   ],
+   "id": "T1197",
+   "name": "BITS Jobs",
+   "sensor_sourced": false,
+   "tactics": [
+    "execution",
+    "persistence",
+    "stealth"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0488"
+   ],
+   "id": "T1199",
+   "name": "Trusted Relationship",
+   "sensor_sourced": true,
+   "tactics": [
+    "initial-access"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0069"
+   ],
+   "id": "T1200",
+   "name": "Hardware Additions",
+   "sensor_sourced": true,
+   "tactics": [
+    "initial-access"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0200"
+   ],
+   "id": "T1202",
+   "name": "Indirect Command Execution",
+   "sensor_sourced": false,
+   "tactics": [
+    "stealth"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0287"
+   ],
+   "id": "T1203",
+   "name": "Exploitation for Client Execution",
+   "sensor_sourced": true,
+   "tactics": [
+    "execution"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0478"
+   ],
+   "id": "T1204",
+   "name": "User Execution",
+   "sensor_sourced": true,
+   "tactics": [
+    "execution"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0066"
+   ],
+   "id": "T1204.001",
+   "name": "Malicious Link",
+   "sensor_sourced": true,
+   "tactics": [
+    "execution"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0248"
+   ],
+   "id": "T1204.003",
+   "name": "Malicious Image",
+   "sensor_sourced": true,
+   "tactics": [
+    "execution"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0340"
+   ],
+   "id": "T1204.004",
+   "name": "Malicious Copy and Paste",
+   "sensor_sourced": true,
+   "tactics": [
+    "execution"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0252"
+   ],
+   "id": "T1204.005",
+   "name": "Malicious Library",
+   "sensor_sourced": true,
+   "tactics": [
+    "execution"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0524"
+   ],
+   "id": "T1205",
+   "name": "Traffic Signaling",
+   "sensor_sourced": true,
+   "tactics": [
+    "command-and-control",
+    "persistence",
+    "stealth"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0302"
+   ],
+   "id": "T1205.001",
+   "name": "Port Knocking",
+   "sensor_sourced": true,
+   "tactics": [
+    "command-and-control",
+    "persistence",
+    "stealth"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0162"
+   ],
+   "id": "T1205.002",
+   "name": "Socket Filters",
+   "sensor_sourced": true,
+   "tactics": [
+    "command-and-control",
+    "persistence",
+    "stealth"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0276"
+   ],
+   "id": "T1207",
+   "name": "Rogue Domain Controller",
+   "sensor_sourced": true,
+   "tactics": [
+    "defense-impairment"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0118"
+   ],
+   "id": "T1210",
+   "name": "Exploitation of Remote Services",
+   "sensor_sourced": true,
+   "tactics": [
+    "lateral-movement"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0413"
+   ],
+   "id": "T1213",
+   "name": "Data from Information Repositories",
+   "sensor_sourced": false,
+   "tactics": [
+    "collection"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0358"
+   ],
+   "id": "T1213.001",
+   "name": "Confluence",
+   "sensor_sourced": false,
+   "tactics": [
+    "collection"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0242"
+   ],
+   "id": "T1213.006",
+   "name": "Databases",
+   "sensor_sourced": true,
+   "tactics": [
+    "collection"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0528"
+   ],
+   "id": "T1216.001",
+   "name": "PubPrn",
+   "sensor_sourced": false,
+   "tactics": [
+    "stealth"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0081"
+   ],
+   "id": "T1218",
+   "name": "System Binary Proxy Execution",
+   "sensor_sourced": false,
+   "tactics": [
+    "stealth"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0342"
+   ],
+   "id": "T1218.001",
+   "name": "Compiled HTML File",
+   "sensor_sourced": false,
+   "tactics": [
+    "stealth"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0328"
+   ],
+   "id": "T1218.003",
+   "name": "CMSTP",
+   "sensor_sourced": false,
+   "tactics": [
+    "stealth"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0506"
+   ],
+   "id": "T1218.005",
+   "name": "Mshta",
+   "sensor_sourced": false,
+   "tactics": [
+    "stealth"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0158"
+   ],
+   "id": "T1218.007",
+   "name": "Msiexec",
+   "sensor_sourced": false,
+   "tactics": [
+    "stealth"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0486"
+   ],
+   "id": "T1218.008",
+   "name": "Odbcconf",
+   "sensor_sourced": false,
+   "tactics": [
+    "stealth"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0361"
+   ],
+   "id": "T1218.009",
+   "name": "Regsvcs/Regasm",
+   "sensor_sourced": false,
+   "tactics": [
+    "stealth"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0282"
+   ],
+   "id": "T1218.010",
+   "name": "Regsvr32",
+   "sensor_sourced": false,
+   "tactics": [
+    "stealth"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0475"
+   ],
+   "id": "T1218.011",
+   "name": "Rundll32",
+   "sensor_sourced": false,
+   "tactics": [
+    "stealth"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0042"
+   ],
+   "id": "T1218.012",
+   "name": "Verclsid",
+   "sensor_sourced": false,
+   "tactics": [
+    "stealth"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0433"
+   ],
+   "id": "T1218.013",
+   "name": "Mavinject",
+   "sensor_sourced": false,
+   "tactics": [
+    "stealth"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0222"
+   ],
+   "id": "T1218.014",
+   "name": "MMC",
+   "sensor_sourced": false,
+   "tactics": [
+    "stealth"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0025"
+   ],
+   "id": "T1218.015",
+   "name": "Electron Applications",
+   "sensor_sourced": false,
+   "tactics": [
+    "stealth"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0496"
+   ],
+   "id": "T1219",
+   "name": "Remote Access Tools",
+   "sensor_sourced": false,
+   "tactics": [
+    "command-and-control"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0133"
+   ],
+   "id": "T1219.001",
+   "name": "IDE Tunneling",
+   "sensor_sourced": true,
+   "tactics": [
+    "command-and-control"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0259"
+   ],
+   "id": "T1219.002",
+   "name": "Remote Desktop Software",
+   "sensor_sourced": true,
+   "tactics": [
+    "command-and-control"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0566"
+   ],
+   "id": "T1221",
+   "name": "Template Injection",
+   "sensor_sourced": false,
+   "tactics": [
+    "stealth"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0562"
+   ],
+   "id": "T1480",
+   "name": "Execution Guardrails",
+   "sensor_sourced": false,
+   "tactics": [
+    "stealth"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0474"
+   ],
+   "id": "T1480.001",
+   "name": "Environmental Keying",
+   "sensor_sourced": false,
+   "tactics": [
+    "stealth"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0238"
+   ],
+   "id": "T1491",
+   "name": "Defacement",
+   "sensor_sourced": false,
+   "tactics": [
+    "impact"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0590"
+   ],
+   "id": "T1491.002",
+   "name": "External Defacement",
+   "sensor_sourced": true,
+   "tactics": [
+    "impact"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0167"
+   ],
+   "id": "T1495",
+   "name": "Firmware Corruption",
+   "sensor_sourced": true,
+   "tactics": [
+    "impact"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0267"
+   ],
+   "id": "T1496",
+   "name": "Resource Hijacking",
+   "sensor_sourced": true,
+   "tactics": [
+    "impact"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0540"
+   ],
+   "id": "T1496.001",
+   "name": "Compute Hijacking",
+   "sensor_sourced": true,
+   "tactics": [
+    "impact"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0028"
+   ],
+   "id": "T1496.002",
+   "name": "Bandwidth Hijacking",
+   "sensor_sourced": true,
+   "tactics": [
+    "impact"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0518"
+   ],
+   "id": "T1498",
+   "name": "Network Denial of Service",
+   "sensor_sourced": true,
+   "tactics": [
+    "impact"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0343"
+   ],
+   "id": "T1498.001",
+   "name": "Direct Network Flood",
+   "sensor_sourced": false,
+   "tactics": [
+    "impact"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0408"
+   ],
+   "id": "T1498.002",
+   "name": "Reflection Amplification",
+   "sensor_sourced": true,
+   "tactics": [
+    "impact"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0208"
+   ],
+   "id": "T1499",
+   "name": "Endpoint Denial of Service",
+   "sensor_sourced": false,
+   "tactics": [
+    "impact"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0356"
+   ],
+   "id": "T1499.001",
+   "name": "OS Exhaustion Flood",
+   "sensor_sourced": true,
+   "tactics": [
+    "impact"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0173"
+   ],
+   "id": "T1499.002",
+   "name": "Service Exhaustion Flood",
+   "sensor_sourced": true,
+   "tactics": [
+    "impact"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0415"
+   ],
+   "id": "T1499.003",
+   "name": "Application Exhaustion Flood",
+   "sensor_sourced": true,
+   "tactics": [
+    "impact"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0304"
+   ],
+   "id": "T1499.004",
+   "name": "Application or System Exploitation",
+   "sensor_sourced": true,
+   "tactics": [
+    "impact"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0547"
+   ],
+   "id": "T1505",
+   "name": "Server Software Component",
+   "sensor_sourced": true,
+   "tactics": [
+    "persistence"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0394"
+   ],
+   "id": "T1505.003",
+   "name": "Web Shell",
+   "sensor_sourced": true,
+   "tactics": [
+    "persistence"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0484"
+   ],
+   "id": "T1530",
+   "name": "Data from Cloud Storage",
+   "sensor_sourced": false,
+   "tactics": [
+    "collection"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0054"
+   ],
+   "id": "T1534",
+   "name": "Internal Spearphishing",
+   "sensor_sourced": false,
+   "tactics": [
+    "lateral-movement"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0247"
+   ],
+   "id": "T1535",
+   "name": "Unused/Unsupported Cloud Regions",
+   "sensor_sourced": false,
+   "tactics": [
+    "stealth"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0573"
+   ],
+   "id": "T1537",
+   "name": "Transfer Data to Cloud Account",
+   "sensor_sourced": false,
+   "tactics": [
+    "exfiltration"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0175"
+   ],
+   "id": "T1542.004",
+   "name": "ROMMONkit",
+   "sensor_sourced": true,
+   "tactics": [
+    "persistence",
+    "stealth"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0582"
+   ],
+   "id": "T1542.005",
+   "name": "TFTP Boot",
+   "sensor_sourced": true,
+   "tactics": [
+    "persistence",
+    "stealth"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0010"
+   ],
+   "id": "T1546",
+   "name": "Event Triggered Execution",
+   "sensor_sourced": false,
+   "tactics": [
+    "persistence",
+    "privilege-escalation"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0020"
+   ],
+   "id": "T1546.004",
+   "name": "Unix Shell Configuration Modification",
+   "sensor_sourced": true,
+   "tactics": [
+    "persistence",
+    "privilege-escalation"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0258"
+   ],
+   "id": "T1546.018",
+   "name": "Python Startup Hooks",
+   "sensor_sourced": true,
+   "tactics": [
+    "persistence",
+    "privilege-escalation"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0409"
+   ],
+   "id": "T1550.002",
+   "name": "Pass the Hash",
+   "sensor_sourced": false,
+   "tactics": [
+    "lateral-movement"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0412"
+   ],
+   "id": "T1552",
+   "name": "Unsecured Credentials",
+   "sensor_sourced": true,
+   "tactics": [
+    "credential-access"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0307"
+   ],
+   "id": "T1552.001",
+   "name": "Credentials In Files",
+   "sensor_sourced": false,
+   "tactics": [
+    "credential-access"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0549"
+   ],
+   "id": "T1552.004",
+   "name": "Private Keys",
+   "sensor_sourced": false,
+   "tactics": [
+    "credential-access"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0001"
+   ],
+   "id": "T1552.005",
+   "name": "Cloud Instance Metadata API",
+   "sensor_sourced": false,
+   "tactics": [
+    "credential-access"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0381"
+   ],
+   "id": "T1552.006",
+   "name": "Group Policy Preferences",
+   "sensor_sourced": false,
+   "tactics": [
+    "credential-access"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0296"
+   ],
+   "id": "T1557",
+   "name": "Adversary-in-the-Middle",
+   "sensor_sourced": true,
+   "tactics": [
+    "collection",
+    "credential-access"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0462"
+   ],
+   "id": "T1557.001",
+   "name": "Name Resolution Poisoning and SMB Relay",
+   "sensor_sourced": true,
+   "tactics": [
+    "collection",
+    "credential-access"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0387"
+   ],
+   "id": "T1557.002",
+   "name": "ARP Cache Poisoning",
+   "sensor_sourced": true,
+   "tactics": [
+    "collection",
+    "credential-access"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0468"
+   ],
+   "id": "T1557.003",
+   "name": "DHCP Spoofing",
+   "sensor_sourced": true,
+   "tactics": [
+    "collection",
+    "credential-access"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0379"
+   ],
+   "id": "T1557.004",
+   "name": "Evil Twin",
+   "sensor_sourced": true,
+   "tactics": [
+    "collection",
+    "credential-access"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0079"
+   ],
+   "id": "T1563",
+   "name": "Remote Service Session Hijacking",
+   "sensor_sourced": true,
+   "tactics": [
+    "lateral-movement"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0256"
+   ],
+   "id": "T1563.001",
+   "name": "SSH Hijacking",
+   "sensor_sourced": false,
+   "tactics": [
+    "lateral-movement"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0588"
+   ],
+   "id": "T1563.002",
+   "name": "RDP Hijacking",
+   "sensor_sourced": false,
+   "tactics": [
+    "lateral-movement"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0059"
+   ],
+   "id": "T1565",
+   "name": "Data Manipulation",
+   "sensor_sourced": false,
+   "tactics": [
+    "impact"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0254"
+   ],
+   "id": "T1565.002",
+   "name": "Transmitted Data Manipulation",
+   "sensor_sourced": false,
+   "tactics": [
+    "impact"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0236"
+   ],
+   "id": "T1566.001",
+   "name": "Spearphishing Attachment",
+   "sensor_sourced": true,
+   "tactics": [
+    "initial-access"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0107"
+   ],
+   "id": "T1566.002",
+   "name": "Spearphishing Link",
+   "sensor_sourced": true,
+   "tactics": [
+    "initial-access"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0115"
+   ],
+   "id": "T1566.003",
+   "name": "Spearphishing via Service",
+   "sensor_sourced": true,
+   "tactics": [
+    "initial-access"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0548"
+   ],
+   "id": "T1567",
+   "name": "Exfiltration Over Web Service",
+   "sensor_sourced": true,
+   "tactics": [
+    "exfiltration"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0318"
+   ],
+   "id": "T1567.001",
+   "name": "Exfiltration to Code Repository",
+   "sensor_sourced": true,
+   "tactics": [
+    "exfiltration"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0570"
+   ],
+   "id": "T1567.002",
+   "name": "Exfiltration to Cloud Storage",
+   "sensor_sourced": true,
+   "tactics": [
+    "exfiltration"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0284"
+   ],
+   "id": "T1567.003",
+   "name": "Exfiltration to Text Storage Sites",
+   "sensor_sourced": true,
+   "tactics": [
+    "exfiltration"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0153"
+   ],
+   "id": "T1567.004",
+   "name": "Exfiltration Over Webhook",
+   "sensor_sourced": true,
+   "tactics": [
+    "exfiltration"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0039"
+   ],
+   "id": "T1568",
+   "name": "Dynamic Resolution",
+   "sensor_sourced": false,
+   "tactics": [
+    "command-and-control"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0485"
+   ],
+   "id": "T1568.001",
+   "name": "Fast Flux DNS",
+   "sensor_sourced": false,
+   "tactics": [
+    "command-and-control"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0419"
+   ],
+   "id": "T1568.002",
+   "name": "Domain Generation Algorithms",
+   "sensor_sourced": false,
+   "tactics": [
+    "command-and-control"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0262"
+   ],
+   "id": "T1568.003",
+   "name": "DNS Calculation",
+   "sensor_sourced": false,
+   "tactics": [
+    "command-and-control"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0421"
+   ],
+   "id": "T1569.002",
+   "name": "Service Execution",
+   "sensor_sourced": false,
+   "tactics": [
+    "execution"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0183"
+   ],
+   "id": "T1570",
+   "name": "Lateral Tool Transfer",
+   "sensor_sourced": false,
+   "tactics": [
+    "lateral-movement"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0227"
+   ],
+   "id": "T1571",
+   "name": "Non-Standard Port",
+   "sensor_sourced": false,
+   "tactics": [
+    "command-and-control"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0538"
+   ],
+   "id": "T1572",
+   "name": "Protocol Tunneling",
+   "sensor_sourced": false,
+   "tactics": [
+    "command-and-control"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0273"
+   ],
+   "id": "T1573",
+   "name": "Encrypted Channel",
+   "sensor_sourced": true,
+   "tactics": [
+    "command-and-control"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0143"
+   ],
+   "id": "T1573.001",
+   "name": "Symmetric Cryptography",
+   "sensor_sourced": true,
+   "tactics": [
+    "command-and-control"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0543"
+   ],
+   "id": "T1573.002",
+   "name": "Asymmetric Cryptography",
+   "sensor_sourced": true,
+   "tactics": [
+    "command-and-control"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0873"
+   ],
+   "id": "T1585",
+   "name": "Establish Accounts",
+   "sensor_sourced": true,
+   "tactics": [
+    "resource-development"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0851"
+   ],
+   "id": "T1585.001",
+   "name": "Social Media Accounts",
+   "sensor_sourced": true,
+   "tactics": [
+    "resource-development"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0876"
+   ],
+   "id": "T1586",
+   "name": "Compromise Accounts",
+   "sensor_sourced": true,
+   "tactics": [
+    "resource-development"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0870"
+   ],
+   "id": "T1586.001",
+   "name": "Social Media Accounts",
+   "sensor_sourced": true,
+   "tactics": [
+    "resource-development"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0841"
+   ],
+   "id": "T1589",
+   "name": "Gather Victim Identity Information",
+   "sensor_sourced": true,
+   "tactics": [
+    "reconnaissance"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0814"
+   ],
+   "id": "T1589.002",
+   "name": "Email Addresses",
+   "sensor_sourced": true,
+   "tactics": [
+    "reconnaissance"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0830"
+   ],
+   "id": "T1595",
+   "name": "Active Scanning",
+   "sensor_sourced": true,
+   "tactics": [
+    "reconnaissance"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0817"
+   ],
+   "id": "T1595.001",
+   "name": "Scanning IP Blocks",
+   "sensor_sourced": true,
+   "tactics": [
+    "reconnaissance"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0867"
+   ],
+   "id": "T1595.002",
+   "name": "Vulnerability Scanning",
+   "sensor_sourced": true,
+   "tactics": [
+    "reconnaissance"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0868"
+   ],
+   "id": "T1595.003",
+   "name": "Wordlist Scanning",
+   "sensor_sourced": true,
+   "tactics": [
+    "reconnaissance"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0823"
+   ],
+   "id": "T1598",
+   "name": "Phishing for Information",
+   "sensor_sourced": true,
+   "tactics": [
+    "reconnaissance"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0821"
+   ],
+   "id": "T1598.001",
+   "name": "Spearphishing Service",
+   "sensor_sourced": true,
+   "tactics": [
+    "reconnaissance"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0865"
+   ],
+   "id": "T1598.002",
+   "name": "Spearphishing Attachment",
+   "sensor_sourced": true,
+   "tactics": [
+    "reconnaissance"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0878"
+   ],
+   "id": "T1598.003",
+   "name": "Spearphishing Link",
+   "sensor_sourced": true,
+   "tactics": [
+    "reconnaissance"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0006"
+   ],
+   "id": "T1599",
+   "name": "Network Boundary Bridging",
+   "sensor_sourced": true,
+   "tactics": [
+    "defense-impairment"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0163"
+   ],
+   "id": "T1599.001",
+   "name": "Network Address Translation Traversal",
+   "sensor_sourced": true,
+   "tactics": [
+    "defense-impairment"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0339"
+   ],
+   "id": "T1600",
+   "name": "Weaken Encryption",
+   "sensor_sourced": true,
+   "tactics": [
+    "defense-impairment"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0243"
+   ],
+   "id": "T1600.001",
+   "name": "Reduce Key Space",
+   "sensor_sourced": true,
+   "tactics": [
+    "defense-impairment"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0494"
+   ],
+   "id": "T1600.002",
+   "name": "Disable Crypto Hardware",
+   "sensor_sourced": true,
+   "tactics": [
+    "defense-impairment"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0592"
+   ],
+   "id": "T1602",
+   "name": "Data from Configuration Repository",
+   "sensor_sourced": true,
+   "tactics": [
+    "collection"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0453"
+   ],
+   "id": "T1602.001",
+   "name": "SNMP (MIB Dump)",
+   "sensor_sourced": true,
+   "tactics": [
+    "collection"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0233"
+   ],
+   "id": "T1602.002",
+   "name": "Network Device Configuration Dump",
+   "sensor_sourced": true,
+   "tactics": [
+    "collection"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0260"
+   ],
+   "id": "T1606",
+   "name": "Forge Web Credentials",
+   "sensor_sourced": false,
+   "tactics": [
+    "credential-access"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0171"
+   ],
+   "id": "T1606.001",
+   "name": "Web Cookies",
+   "sensor_sourced": false,
+   "tactics": [
+    "credential-access"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0249"
+   ],
+   "id": "T1610",
+   "name": "Deploy Container",
+   "sensor_sourced": false,
+   "tactics": [
+    "execution"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0459"
+   ],
+   "id": "T1612",
+   "name": "Build Image on Host",
+   "sensor_sourced": true,
+   "tactics": [
+    "stealth"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0043"
+   ],
+   "id": "T1614",
+   "name": "System Location Discovery",
+   "sensor_sourced": false,
+   "tactics": [
+    "discovery"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0055"
+   ],
+   "id": "T1615",
+   "name": "Group Policy Discovery",
+   "sensor_sourced": true,
+   "tactics": [
+    "discovery"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0349"
+   ],
+   "id": "T1659",
+   "name": "Content Injection",
+   "sensor_sourced": true,
+   "tactics": [
+    "command-and-control",
+    "initial-access"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0411"
+   ],
+   "id": "T1665",
+   "name": "Hide Infrastructure",
+   "sensor_sourced": true,
+   "tactics": [
+    "command-and-control"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0536"
+   ],
+   "id": "T1669",
+   "name": "Wi-Fi Networks",
+   "sensor_sourced": false,
+   "tactics": [
+    "initial-access"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0899"
+   ],
+   "id": "T1684",
+   "name": "Social Engineering",
+   "sensor_sourced": true,
+   "tactics": [
+    "stealth"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0306"
+   ],
+   "id": "T1686.002",
+   "name": "Network Device Firewall",
+   "sensor_sourced": true,
+   "tactics": [
+    "defense-impairment"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0901"
+   ],
+   "id": "T1686.003",
+   "name": "Windows Host Firewall",
+   "sensor_sourced": false,
+   "tactics": [
+    "defense-impairment"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0900"
+   ],
+   "id": "T1687",
+   "name": "Exploitation for Defense Impairment",
+   "sensor_sourced": true,
+   "tactics": [
+    "defense-impairment"
+   ]
+  },
+  {
+   "detection_strategies": [
+    "DET0927"
+   ],
+   "id": "T1700",
+   "name": "AI-Enabled Exfiltration",
+   "sensor_sourced": false,
+   "tactics": [
+    "exfiltration"
+   ]
+  }
+ ]
+}

@@ -5,19 +5,20 @@ autonomy-completion effort (Documentation/ARGUS_AUTONOMY_DEPENDENCY_MAP.md).
 Not part of the pytest suite -- run directly:
 `.venv/Scripts/python.exe tests/test_argus_shadow_sandbox.py`
 
+Since U7 (2026-10-14) the shadow is live_engine.decide() on the real cycle's EvaluatedCycle
+(gathered facts + champion parameters) with one parameter replaced -- no second gather, no
+graph transaction. tests/test_argus_shadow_side_effect_free.py covers the in-memory side
+effects; this file covers the sandbox's own contract.
+
 Sections:
-  A. Rollback guarantee: a real shadow evaluate() call (device_id set, so the real
-     evaluate() genuinely writes evidence/decisions rows) leaves the graph's evidence/
-     decisions row counts byte-for-byte unchanged afterward -- only shadow_decisions
-     gains exactly one row. This is the one property that makes running evaluate() a
-     second time in production safe at all.
-  B. Candidate substitution genuinely reaches the patched code path: a stubbed
-     live_engine.evaluate() reads AutotuneEngine.get_active_value() itself and proves
-     it sees the CANDIDATE value, not whatever is really promoted -- and that the
-     monkey-patch is restored (never left dangling) both on success and on failure.
-  C. Fail-safe: a raising live_engine.evaluate() never propagates out of
-     evaluate_candidate_shadow(), records no shadow_decisions row, and still restores
-     the patched get_active_value.
+  A. Writes nothing but its own row: a shadow comparison leaves the graph's evidence/
+     decisions row counts unchanged -- only shadow_decisions gains exactly one row,
+     carrying the real change_id/device_id/real_state.
+  B. The candidate reaches decide(): decide() receives the real cycle's gathered facts
+     (the same object) and the champion parameters with exactly the one canary field
+     replaced.
+  C. Fail-safe: a raising decide() never propagates out of evaluate_candidate_shadow(),
+     returns None and records no shadow_decisions row.
   D. ShadowEvaluator candidate-selection preference order: device-scoped canary wins
      over category-scoped, which wins over global -- proven via which change_id was
      actually passed to evaluate_candidate_shadow(), not by inspecting internal state.
@@ -25,14 +26,15 @@ Sections:
      shadow_eval_paused gauge to 1 when pressure is active, 0 otherwise.
   F. shadow_decisions row-count bound: _prune_shadow_decisions_if_oversized() clamps
      back down to the documented cap, oldest rows first.
-  G. The candidate is visible to the shadow thread only (2026-10-06, runtime trace run 2
-     finding 4.4): another thread reading the same parameter during a shadow call sees
-     the promoted value. The substitution is a ContextVar (autotune.engine.shadow_override),
-     no longer a class-attribute patch, so B's and C's "restored" checks hold trivially.
+  G. Only decide-stage parameters (live_engine.DECIDE_PARAMETERS) are shadow-compared: a
+     candidate for any other tunable returns None, records no row and never reaches
+     decide(); ShadowEvaluator does not select such canaries. (The old thread-local
+     autotuner override -- runtime trace run 2, finding 4.4 -- is gone with the re-run:
+     the candidate never reaches the autotuner at all.)
 """
+import dataclasses
 import sys
 import tempfile
-import time
 import uuid
 from pathlib import Path as _PathForSysPath
 sys.path.insert(0, str(_PathForSysPath(__file__).resolve().parent.parent / "src"))
@@ -50,7 +52,6 @@ def check(name, cond, detail=""):
 from intelligence.hypotheses.evidence import Evidence as V1Evidence  # noqa: E402
 from intelligence.reputation.classifier import ReputationVector  # noqa: E402
 import argus.ops.live_engine as live_engine  # noqa: E402
-from argus.autotune.engine import AutotuneEngine  # noqa: E402
 import argus.shadow.sandbox as sandbox  # noqa: E402
 from argus.shadow.sandbox import ShadowEvaluator, evaluate_candidate_shadow  # noqa: E402
 
@@ -84,213 +85,139 @@ def _table_count(store, table):
     return store._conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
 
 
-# --- A. rollback guarantee ---
+def _quiet_cycle(device_id, device_type=""):
+    return live_engine.evaluate_cycle([], ReputationVector(domain="", tier=0), device_type=device_type,
+                                      features={}, device_id=device_id, now=NOW)[1]
+
+
+# --- A. writes nothing but its own row ---
 
 store_a = _fresh_store()
 store_a.upsert_device("shadowDevA", timestamp=NOW)
 change_id_a = _insert_canary(store_a, "familiarity_trust_bar", 0.9, device_id=None)
 
 ev_a = [V1Evidence(type="zeek_notice_medium", source="zeek", timestamp=NOW, device="shadowDevA",
-                     value=1.0, confidence=0.6, independence_group="zeek_network", domain="example.com")]
+                     value=1.0, confidence=0.6, domain="example.com")]
 rep_a = ReputationVector(domain="example.com", tier=1)
-
-# A real (non-shadow) call first, to establish a genuine baseline the shadow call
-# must not disturb.
-real_decision_a = live_engine.evaluate(list(ev_a), rep_a, features={}, device_id="shadowDevA", now=NOW)
+real_decision_a, cycle_a = live_engine.evaluate_cycle(list(ev_a), rep_a, features={}, device_id="shadowDevA",
+                                                      now=NOW)
 
 evidence_count_before = _table_count(store_a, "evidence")
 decisions_count_before = _table_count(store_a, "decisions")
+agree_a = evaluate_candidate_shadow(store_a, change_id_a, "familiarity_trust_bar", 0.9, cycle_a,
+                                    real_decision_a["state"], NOW + 1)
 
-agree_a = evaluate_candidate_shadow(
-    store_a, change_id_a, "familiarity_trust_bar", 0.9, "shadowDevA", "",
-    list(ev_a), rep_a, {}, False, 0.0, real_decision_a["state"], NOW + 1,
-)
-
-evidence_count_after = _table_count(store_a, "evidence")
-decisions_count_after = _table_count(store_a, "decisions")
-shadow_rows_a = _table_count(store_a, "shadow_decisions")
-
-check("A: evaluate_candidate_shadow() returns a real bool agreement result",
-      agree_a in (True, False))
-check("A: the shadow call's own graph writes were fully rolled back -- evidence row "
-      "count is unchanged from immediately before the shadow call",
-      evidence_count_after == evidence_count_before)
-check("A: the shadow call's own graph writes were fully rolled back -- decisions row "
-      "count is unchanged from immediately before the shadow call",
-      decisions_count_after == decisions_count_before)
+check("A: evaluate_candidate_shadow() returns a real bool agreement result", agree_a in (True, False))
+check("A: the shadow comparison wrote no evidence row", _table_count(store_a, "evidence") == evidence_count_before)
+check("A: the shadow comparison wrote no decisions row",
+      _table_count(store_a, "decisions") == decisions_count_before)
 check("A: exactly one shadow_decisions row was recorded for the one comparison made",
-      shadow_rows_a == 1)
-
+      _table_count(store_a, "shadow_decisions") == 1)
 shadow_row_a = store_a._conn.execute(
     "SELECT change_id, device_id, real_state, shadow_state, agree FROM shadow_decisions"
 ).fetchone()
 check("A: the recorded shadow_decisions row carries the real change_id/device_id",
       shadow_row_a["change_id"] == change_id_a and shadow_row_a["device_id"] == "shadowDevA")
-check("A: the recorded row's real_state matches the REAL (non-shadow) decision's own state",
+check("A: the recorded row's real_state matches the REAL decision's own state",
       shadow_row_a["real_state"] == real_decision_a["state"])
 
 
-# --- B. candidate substitution genuinely reaches the patched code path ---
+# --- B. the candidate reaches decide(), nothing else changes ---
 
 store_b = _fresh_store()
 store_b.upsert_device("shadowDevB", timestamp=NOW)
-change_id_b = _insert_canary(store_b, "bocpd_hazard_rate", 0.0123, device_id=None)
-
-seen_values = []
-
-
-class _FakeLiveEngineModule:
-    @staticmethod
-    def evaluate(active_evidence_v1, rep_vector, device_type="", baseline_familiarity=0.0,
-                  features=None, is_safe=False, fallback_evaluate=None,
-                  device_id=None, now=None, geoip_engine=None):
-        seen_values.append(AutotuneEngine(store_b).get_active_value(
-            "bocpd_hazard_rate", device_id=device_id, device_type=device_type, default=-1.0,
-        ))
-        return {"state": "BENIGN"}
+change_id_b = _insert_canary(store_b, "peer_deviation_multiplier", 4.5, device_id=None)
+cycle_b = _quiet_cycle("shadowDevB")
+seen_b = []
+_real_decide = live_engine.decide
 
 
-_original_get_active_value_b = AutotuneEngine.get_active_value
+def _capturing_decide(gathered, params):
+    seen_b.append((gathered, params))
+    return _real_decide(gathered, params)
 
 
-def _run_with_faked_live_engine_import(fn):
-    """evaluate_candidate_shadow() does `import argus.ops.live_engine as live_engine`
-    locally -- the simplest, least-invasive way to intercept that specific call
-    without touching the real module other callers share is to temporarily replace
-    the REAL module's own evaluate attribute, call through, then restore it."""
-    real_evaluate = live_engine.evaluate
-    live_engine.evaluate = _FakeLiveEngineModule.evaluate
-    try:
-        return fn()
-    finally:
-        live_engine.evaluate = real_evaluate
+live_engine.decide = _capturing_decide
+try:
+    evaluate_candidate_shadow(store_b, change_id_b, "peer_deviation_multiplier", 4.5, cycle_b, "BENIGN", NOW + 2)
+finally:
+    live_engine.decide = _real_decide
+
+check("B: decide() was called once, on the real cycle's own gathered facts (same object)",
+      len(seen_b) == 1 and seen_b[0][0] is cycle_b.gathered)
+check("B: decide() got the CANDIDATE value for the canary parameter",
+      bool(seen_b) and seen_b[0][1].peer_deviation_multiplier == 4.5)
+check("B: every other parameter is the champion's, unchanged",
+      bool(seen_b) and dataclasses.replace(
+          seen_b[0][1], peer_deviation_multiplier=cycle_b.params.peer_deviation_multiplier) == cycle_b.params)
 
 
-agree_b = _run_with_faked_live_engine_import(lambda: evaluate_candidate_shadow(
-    store_b, change_id_b, "bocpd_hazard_rate", 0.0123, "shadowDevB", "",
-    [], ReputationVector(domain="", tier=0), {}, False, 0.0, "BENIGN", NOW + 2,
-))
-
-check("B: the stubbed evaluate() saw the CANDIDATE value (0.0123), not the default/-1.0 "
-      "sentinel -- proves AutotuneEngine.get_active_value was really patched for the "
-      "duration of the shadow call",
-      len(seen_values) == 1 and seen_values[0] == 0.0123)
-check("B: AutotuneEngine.get_active_value is restored to the original unpatched method "
-      "immediately after the shadow call returns",
-      AutotuneEngine.get_active_value is _original_get_active_value_b)
-
-# A second, ordinary (non-candidate) parameter must be UNAFFECTED by the patch --
-# proves the substitution is scoped to exactly the one parameter in canary.
-untouched_value = AutotuneEngine(store_b).get_active_value(
-    "reputation_tier_suspicious_floor", device_id="shadowDevB", default=42.0,
-)
-check("B: a DIFFERENT parameter's get_active_value() is completely unaffected by the "
-      "patch (still resolves to its own real default, not the candidate value)",
-      untouched_value == 42.0)
-
-
-# --- C. fail-safe: a raising evaluate() never propagates ---
+# --- C. fail-safe: a raising decide() never propagates ---
 
 store_c = _fresh_store()
 store_c.upsert_device("shadowDevC", timestamp=NOW)
-change_id_c = _insert_canary(store_c, "trust_cache_ttl_seconds", 999.0, device_id=None)
+change_id_c = _insert_canary(store_c, "familiarity_trust_bar", 0.8, device_id=None)
+cycle_c = _quiet_cycle("shadowDevC")
 
 
-class _ExplodingLiveEngine:
-    @staticmethod
-    def evaluate(*a, **kw):
-        raise RuntimeError("simulated shadow evaluate() failure")
+def _exploding_decide(gathered, params):
+    raise RuntimeError("simulated shadow decide() failure")
 
 
-_original_get_active_value_c = AutotuneEngine.get_active_value
-real_evaluate_c = live_engine.evaluate
-live_engine.evaluate = _ExplodingLiveEngine.evaluate
+live_engine.decide = _exploding_decide
 raised_c = False
+result_c = "not run"
 try:
-    result_c = evaluate_candidate_shadow(
-        store_c, change_id_c, "trust_cache_ttl_seconds", 999.0, "shadowDevC", "",
-        [], ReputationVector(domain="", tier=0), {}, False, 0.0, "BENIGN", NOW + 3,
-    )
+    result_c = evaluate_candidate_shadow(store_c, change_id_c, "familiarity_trust_bar", 0.8, cycle_c, "BENIGN",
+                                         NOW + 3)
 except Exception:
     raised_c = True
 finally:
-    live_engine.evaluate = real_evaluate_c
+    live_engine.decide = _real_decide
 
-check("C: evaluate_candidate_shadow() NEVER raises out to the caller, even when the "
-      "underlying evaluate() itself raises -- the real decision this cycle must never "
-      "be affected by a shadow-eval failure",
-      raised_c is False)
-check("C: a failed shadow evaluation returns None (no comparison could be made), not a "
-      "fabricated True/False agreement",
-      result_c is None)
+check("C: evaluate_candidate_shadow() never raises out to the caller, even when decide() raises", raised_c is False)
+check("C: a failed shadow evaluation returns None, not a fabricated agreement", result_c is None)
 check("C: no shadow_decisions row was recorded for the failed comparison",
       _table_count(store_c, "shadow_decisions") == 0)
-check("C: AutotuneEngine.get_active_value is still restored after a raising evaluate() call",
-      AutotuneEngine.get_active_value is _original_get_active_value_c)
-check("C: the candidate override is cleared after a raising evaluate() call",
-      AutotuneEngine(store_c).get_active_value("trust_cache_ttl_seconds", default=7.0) == 7.0)
 
 
-# --- G. the candidate is visible to the shadow thread ONLY (runtime trace run 2, 4.4) ---
-# The old implementation patched the class attribute, so an allowlist check on another
-# thread (is_allowlisted -> get_active_value("trust_cache_ttl_seconds")) read the canary
-# value while a shadow call ran.
-import threading  # noqa: E402
+# --- G. only decide-stage parameters are shadow-compared ---
 
 store_g = _fresh_store()
 store_g.upsert_device("shadowDevG", timestamp=NOW)
 change_id_g = _insert_canary(store_g, "trust_cache_ttl_seconds", 172800.0, device_id=None)
-seen_g = {}
-
-
-class _CrossThreadLiveEngine:
-    @staticmethod
-    def evaluate(*a, **kw):
-        seen_g["shadow_thread"] = AutotuneEngine(store_g).get_active_value(
-            "trust_cache_ttl_seconds", default=-1.0)
-
-        def _other_thread():
-            seen_g["other_thread"] = AutotuneEngine(store_g).get_active_value(
-                "trust_cache_ttl_seconds", default=-1.0)
-
-        t = threading.Thread(target=_other_thread)
-        t.start()
-        t.join()
-        return {"state": "BENIGN"}
-
-
-real_evaluate_g = live_engine.evaluate
-live_engine.evaluate = _CrossThreadLiveEngine.evaluate
+cycle_g = _quiet_cycle("shadowDevG")
+calls_g = []
+live_engine.decide = lambda gathered, params: calls_g.append(1) or _real_decide(gathered, params)
 try:
-    evaluate_candidate_shadow(
-        store_g, change_id_g, "trust_cache_ttl_seconds", 172800.0, "shadowDevG", "",
-        [], ReputationVector(domain="", tier=0), {}, False, 0.0, "BENIGN", NOW + 4,
-    )
+    result_g = evaluate_candidate_shadow(store_g, change_id_g, "trust_cache_ttl_seconds", 172800.0, cycle_g,
+                                         "BENIGN", NOW + 4)
 finally:
-    live_engine.evaluate = real_evaluate_g
-
-check("G: the shadow call itself sees the candidate value",
-      seen_g.get("shadow_thread") == 172800.0, str(seen_g))
-check("G: another thread reading the same parameter DURING the shadow call sees the "
-      "promoted value (here: none, so the default), never the candidate",
-      seen_g.get("other_thread") == -1.0, str(seen_g))
-check("G: after the call, this thread is back to the promoted value",
-      AutotuneEngine(store_g).get_active_value("trust_cache_ttl_seconds", default=-1.0) == -1.0)
+    live_engine.decide = _real_decide
+check("G: trust_cache_ttl_seconds is not a decide-stage parameter",
+      "trust_cache_ttl_seconds" not in live_engine.DECIDE_PARAMETERS)
+check("G: a non-decide candidate returns None, never reaches decide(), records no row",
+      result_g is None and not calls_g and _table_count(store_g, "shadow_decisions") == 0)
+spy_g = []
+_real_evaluate_candidate_shadow = sandbox.evaluate_candidate_shadow
+sandbox.evaluate_candidate_shadow = lambda *a, **kw: spy_g.append(a[1]) or True
+try:
+    ShadowEvaluator(store_g).maybe_shadow_evaluate(cycle_g, real_state="BENIGN", now=NOW)
+finally:
+    sandbox.evaluate_candidate_shadow = _real_evaluate_candidate_shadow
+check("G: ShadowEvaluator does not select a canary whose parameter is not decide-stage", spy_g == [], str(spy_g))
 
 
 # --- D. ShadowEvaluator candidate-selection preference order ---
 
 store_d = _fresh_store()
 store_d.upsert_device("shadowDevD", timestamp=NOW)
-
-change_global = _insert_canary(store_d, "combined_uncertain_threshold", 0.7, device_id=None)
-change_category = _insert_canary(store_d, "combined_uncertain_threshold", 0.6,
-                                    device_id=None, device_type="smart_tv")
-change_device = _insert_canary(store_d, "combined_uncertain_threshold", 0.5,
-                                  device_id="shadowDevD")
+change_global = _insert_canary(store_d, "familiarity_trust_bar", 0.7, device_id=None)
+change_category = _insert_canary(store_d, "familiarity_trust_bar", 0.6, device_id=None, device_type="smart_tv")
+change_device = _insert_canary(store_d, "familiarity_trust_bar", 0.5, device_id="shadowDevD")
+cycle_d = _quiet_cycle("shadowDevD", device_type="smart_tv")
 
 calls_seen = []
-_real_evaluate_candidate_shadow = sandbox.evaluate_candidate_shadow
 
 
 def _spy_evaluate_candidate_shadow(store, change_id, parameter, candidate_value, *a, **kw):
@@ -300,12 +227,7 @@ def _spy_evaluate_candidate_shadow(store, change_id, parameter, candidate_value,
 
 sandbox.evaluate_candidate_shadow = _spy_evaluate_candidate_shadow
 try:
-    evaluator_d = ShadowEvaluator(store_d)
-    evaluator_d.maybe_shadow_evaluate(
-        device_id="shadowDevD", device_type="smart_tv", active_evidence_v1=[],
-        rep_vector=ReputationVector(domain="", tier=0), features={}, is_safe=False,
-        baseline_familiarity=0.0, real_state="BENIGN", now=NOW,
-    )
+    ShadowEvaluator(store_d).maybe_shadow_evaluate(cycle_d, real_state="BENIGN", now=NOW)
 finally:
     sandbox.evaluate_candidate_shadow = _real_evaluate_candidate_shadow
 
@@ -313,19 +235,12 @@ check("D: with a device-scoped canary active for this exact device, it is prefer
       "over both the category- and global-scoped canaries also active",
       calls_seen == [change_device])
 
-# Remove the device-scoped canary's eligibility (roll it back) and confirm category wins next.
-store_d._conn.execute("UPDATE threshold_history SET rolled_back_at = ? WHERE change_id = ?",
-                        (NOW, change_device))
+store_d._conn.execute("UPDATE threshold_history SET rolled_back_at = ? WHERE change_id = ?", (NOW, change_device))
 store_d._maybe_commit()
 calls_seen.clear()
 sandbox.evaluate_candidate_shadow = _spy_evaluate_candidate_shadow
 try:
-    evaluator_d2 = ShadowEvaluator(store_d)
-    evaluator_d2.maybe_shadow_evaluate(
-        device_id="shadowDevD", device_type="smart_tv", active_evidence_v1=[],
-        rep_vector=ReputationVector(domain="", tier=0), features={}, is_safe=False,
-        baseline_familiarity=0.0, real_state="BENIGN", now=NOW,
-    )
+    ShadowEvaluator(store_d).maybe_shadow_evaluate(cycle_d, real_state="BENIGN", now=NOW)
 finally:
     sandbox.evaluate_candidate_shadow = _real_evaluate_candidate_shadow
 
@@ -338,19 +253,15 @@ check("D: once the device-scoped canary is no longer active, the category-scoped
 
 store_e = _fresh_store()
 store_e.upsert_device("shadowDevE", timestamp=NOW)
-_insert_canary(store_e, "combined_uncertain_threshold", 0.7, device_id=None)
+_insert_canary(store_e, "familiarity_trust_bar", 0.7, device_id=None)
+cycle_e = _quiet_cycle("shadowDevE")
 
 _real_is_pressure = sandbox.is_resource_pressure_active_in_process
 sandbox.is_resource_pressure_active_in_process = lambda *a, **kw: True
 calls_seen_e = []
 sandbox.evaluate_candidate_shadow = lambda *a, **kw: calls_seen_e.append(1) or True
 try:
-    evaluator_e = ShadowEvaluator(store_e)
-    evaluator_e.maybe_shadow_evaluate(
-        device_id="shadowDevE", device_type="", active_evidence_v1=[],
-        rep_vector=ReputationVector(domain="", tier=0), features={}, is_safe=False,
-        baseline_familiarity=0.0, real_state="BENIGN", now=NOW,
-    )
+    ShadowEvaluator(store_e).maybe_shadow_evaluate(cycle_e, real_state="BENIGN", now=NOW)
 finally:
     sandbox.is_resource_pressure_active_in_process = _real_is_pressure
     sandbox.evaluate_candidate_shadow = _real_evaluate_candidate_shadow
@@ -363,12 +274,7 @@ check("E: the shadow_eval_paused gauge reads 1 while pressure is active",
 
 sandbox.is_resource_pressure_active_in_process = lambda *a, **kw: False
 try:
-    evaluator_e2 = ShadowEvaluator(store_e)
-    evaluator_e2.maybe_shadow_evaluate(
-        device_id="shadowDevE", device_type="", active_evidence_v1=[],
-        rep_vector=ReputationVector(domain="", tier=0), features={}, is_safe=False,
-        baseline_familiarity=0.0, real_state="BENIGN", now=NOW,
-    )
+    ShadowEvaluator(store_e).maybe_shadow_evaluate(cycle_e, real_state="BENIGN", now=NOW)
 finally:
     sandbox.is_resource_pressure_active_in_process = _real_is_pressure
 
@@ -380,7 +286,7 @@ check("E: the shadow_eval_paused gauge clears back to 0 once pressure is no long
 
 store_f = _fresh_store()
 store_f.upsert_device("shadowDevF", timestamp=NOW)
-change_id_f = _insert_canary(store_f, "combined_uncertain_threshold", 0.7, device_id=None)
+change_id_f = _insert_canary(store_f, "familiarity_trust_bar", 0.7, device_id=None)
 
 cap = sandbox._MAX_SHADOW_DECISIONS
 for i in range(cap + 25):

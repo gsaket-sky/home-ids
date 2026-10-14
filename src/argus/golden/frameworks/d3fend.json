@@ -1,0 +1,36 @@
+{
+ "source": {
+  "framework": "MITRE D3FEND",
+  "version": "1.6.0",
+  "sha256": "e1546d432c6aa64d45b62dd9e9484b0774ae84de7ff3605ff9dd4e20278957bf",
+  "url": "https://d3fend.mitre.org/ontologies/d3fend.json",
+  "check": "python tools/golden/d3fend_check.py --ontology <d3fend.json> verifies every id and name below against the pinned ontology"
+ },
+ "rule": "an active claim needs >= 1 active attack scenario proving it fires and >= 1 active benign scenario proving it stays quiet; a planned claim names its phase",
+ "claims": [
+  {"id": "D3-CAA", "name": "Connection Attempt Analysis", "status": "active", "how": "port / lateral scan and connection-abuse detectors (Zeek conn), ARP sweep"},
+  {"id": "D3-DNR", "name": "Decoy Network Resource", "status": "active", "how": "internal decoy host; contact is an owner-named single-signal exception"},
+  {"id": "D3-DNRA", "name": "Domain Name Reputation Analysis", "status": "active", "how": "optional feeds / VirusTotal per domain; never 'clean' when unavailable"},
+  {"id": "D3-DNSDL", "name": "DNS Denylisting", "status": "active", "how": "Pi-hole blocks, only on a contained verdict"},
+  {"id": "D3-DNSTA", "name": "DNS Traffic Analysis", "status": "active", "how": "DGA, tunnelling, rate, resolver-bypass detectors"},
+  {"id": "D3-IPRA", "name": "IP Reputation Analysis", "status": "active", "how": "optional feeds / AbuseIPDB per address; curated feed match is an owner-named exception"},
+  {"id": "D3-NI", "name": "Network Isolation", "status": "active", "how": "router isolation / tarpit through the containment gate"},
+  {"id": "D3-NTA", "name": "Network Traffic Analysis", "status": "active", "how": "Zeek-derived beaconing, notices, ARP observations"},
+  {"id": "D3-NTCD", "name": "Network Traffic Community Deviation", "status": "active", "how": "peer-cohort deviation (context) and cross-device coordinated targeting"},
+  {"id": "D3-NTPM", "name": "Network Traffic Policy Mapping", "status": "active", "how": "geofencing policy"},
+  {"id": "D3-NTSA", "name": "Network Traffic Signature Analysis", "status": "active", "how": "Suricata signatures (corroboration-gated)"},
+  {"id": "D3-OTF", "name": "Outbound Traffic Filtering", "status": "active", "how": "resolver-bypass detection and Pi-hole / tarpit enforcement"},
+  {"id": "D3-PHDURA", "name": "Per Host Download-Upload Ratio Analysis", "status": "active", "how": "per-device upload volume (exfiltration); ratio with resp_bytes and the upload ledger in P1/P4"},
+  {"id": "D3-PMAD", "name": "Protocol Metadata Anomaly Detection", "status": "active", "how": "DNS label shape / tunnelling; protocol facts from conn/ssl in P1"},
+  {"id": "D3-CA", "name": "Certificate Analysis", "status": "planned", "phase": "P1", "how": "ssl/x509 facts as observations"},
+  {"id": "D3-PCA", "name": "Passive Certificate Analysis", "status": "planned", "phase": "P1", "how": "SNI / certificate binding from Zeek ssl/x509"},
+  {"id": "D3-CSPP", "name": "Client-server Payload Profiling", "status": "planned", "phase": "P4", "how": "named upload profiles, shape statistics (design N3/N4)"},
+  {"id": "D3-FAPA", "name": "File Access Pattern Analysis", "status": "planned", "phase": "P4", "how": "SMB file-operation observations"},
+  {"id": "D3-ISVA", "name": "Inbound Session Volume Analysis", "status": "planned", "phase": "P4", "how": "inbound-initiated flows per device"},
+  {"id": "D3-ITF", "name": "Inbound Traffic Filtering", "status": "planned", "phase": "P4", "how": "UPnP / inbound exposure findings"},
+  {"id": "D3-RPA", "name": "Relay Pattern Analysis", "status": "planned", "phase": "P4", "how": "proxyware / relay detector"},
+  {"id": "D3-WSAA", "name": "Web Session Activity Analysis", "status": "planned", "phase": "P4", "how": "account-level entities on trusted web services"},
+  {"id": "D3-RTSD", "name": "Remote Terminal Session Detection", "status": "planned", "phase": "P4", "how": "RDP / SSH / VNC / WinRM sessions from unusual peers"},
+  {"id": "D3-RTA", "name": "RPC Traffic Analysis", "status": "planned", "phase": "P4", "how": "DCOM / RPC lateral sessions"}
+ ]
+}

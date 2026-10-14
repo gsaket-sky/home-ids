@@ -69,12 +69,11 @@ def _remove_gauge_labels(gauge, *labels) -> None:
 # specific host, keeping with this project's network-agnostic-design standard) purely
 # to decide when to require the SAME interactive/Telegram-approval path
 # `interactive_blocking_enabled` already provides for every device, not to grant any
-# immunity -- lateral_threat (actual observed internal port-scan/lateral movement, the
-# one signal this file already treats as strong enough to override the operator-
-# release cooldown) still bypasses this exactly as it bypasses interactive_mode below.
-# Not underscore-prefixed: pipeline.py imports this too, so its own "queue an approval
-# button" decision (the containment_status rewrite in its main loop) can never drift
-# out of sync with what this file actually held back -- see that call site's comment.
+# immunity. U1 (2026-10-14, owner decision): a critical-role device waits for approval
+# on EVERY autonomous path, the single-signal exceptions (honeypot, ARP spoofing,
+# verified feed IOC) included -- see mitigation/containment_gate.py. pipeline.py reads
+# what mitigate() actually queued (result["pending_device_containment"]), so its
+# approval button cannot drift from what this file held back.
 CRITICAL_DEVICE_TYPES = frozenset({"router", "gateway", "nas", "smart_tv"})
 
 
@@ -98,6 +97,7 @@ import ipaddress
 import socket as _socket_mod
 from mitigation import l2_raw
 from mitigation import containment as _ct
+from mitigation.containment_gate import APPROVAL, ISOLATE, WITHHELD, ContainmentAuthorization, device_isolation_action
 from mitigation import pihole_auth
 from mitigation import peer_table as _peer_mod       # T2: same-segment peer observation (socket-free core)
 from mitigation import l2_enforcer as _l2e           # T2: which forged frames to send (socket-free decisions)
@@ -865,19 +865,23 @@ class IPSMitigator:
         st: Any,
         target_domain: str,
         risk_score: float,
-        lateral_threat: bool,
+        authorization: ContainmentAuthorization,
         is_safe: bool,
         ti_engine: Optional[Any] = None,
         reason: str = "High Risk Identified",
         fp_verdict: Optional[dict] = None,
-        decision_state: str = "SUSPICIOUS",
         alert_ref: Optional[dict] = None,
     ) -> Dict[str, Any]:
-        """Autonomous containment for one alert. `alert_ref` names the alert ({"incident_id", "signature",
-        "target_source", "evidence_types"}) and is recorded with every block / isolation / tarpit this call creates.
+        """Containment for one alert, as far as `authorization` allows (mitigation/containment_gate.py: the decision's
+        basis -- corroborated, an owner-named single-signal exception, or an operator's approval; MONITOR_ONLY contains
+        nothing). Device isolation additionally needs its severity floor (router 8.5, tarpit 9.0 on `risk_score`).
+        `alert_ref` names the alert ({"incident_id", "signature", "target_source", "evidence_types"}) and is recorded
+        with every block / isolation / tarpit this call creates.
         Returns {"actions": graph containment action ids this call created, "domain_blocked": the domain this call
-        blocked or None, "pending_domain_block": the domain waiting for a person (interactive mode) or None}."""
-        result: Dict[str, Any] = {"actions": [], "domain_blocked": None, "pending_domain_block": None}
+        blocked or None, "pending_domain_block": the domain waiting for a person (interactive mode) or None,
+        "pending_device_containment": True when router isolation or the tarpit was queued for a person's approval}."""
+        result: Dict[str, Any] = {"actions": [], "domain_blocked": None, "pending_domain_block": None,
+                                  "pending_device_containment": False}
         LOGGER.debug("Mitigate evaluation triggered | Device: %s, Domain: %s, Risk: %.2f, Safe: %s", 
                      getattr(st, "hostname", "unknown"), target_domain, risk_score, is_safe)
 
@@ -943,7 +947,8 @@ class IPSMitigator:
         # ONBOARDING GRACE PERIOD (PRODUCTIZATION_ROADMAP.md Phase 4): a brand-new
         # network hasn't had time to build a real baseline yet, so every autonomous
         # containment mechanism -- Pi-hole, router isolation, AND the Layer-2 tarpit --
-        # stays off regardless of decision_state while onboarding is active. Broader than
+        # stays off regardless of the decision while onboarding is active (autonomous actions only:
+        # an operator's approval executes, see mitigate()). Broader than
         # PRODUCT_ARCHITECTURE.md's original two-mechanism sketch (ips_pihole_enabled/
         # ips_router_enabled only) -- the tarpit is the single most disruptive mechanism
         # here (it can genuinely break a real device's connectivity), so it would defeat
@@ -951,7 +956,8 @@ class IPSMitigator:
         # leave it exempt. Detection/alerting/Telegram are completely unaffected -- this
         # gates action only, same as every other per-mechanism toggle below.
         onboarding_state_dir = str(Path(self.config.get("state_path", "state/ids_state.json")).parent)
-        onboarding_active = is_onboarding_active(self.config, onboarding_state_dir)
+        # The grace period holds AUTONOMOUS actions only: an operator's explicit approval executes (U1, 2026-10-14).
+        onboarding_active = is_onboarding_active(self.config, onboarding_state_dir) and not authorization.operator
         if onboarding_active:
             LOGGER.debug(
                 "🕒 [ONBOARDING] Autonomous mitigation withheld for %s -- grace period "
@@ -967,25 +973,21 @@ class IPSMitigator:
 
         # SEVERITY-GATED BLOCKING: a complete safe-domain list can never exist, so blocking
         # cannot rely on "not on the allowlist" as its bar — that blocks anything merely
-        # unrecognized, which risks breaking a device's normal function on nothing more than
-        # CL-AFPE failing to suppress it. Pi-hole blocking now requires the decision engine's
-        # own corroborated verdict (HIGH/CRITICAL — reached only via a hard-stop, a confirmed
-        # reputation tier, or >=2 independent evidence sources scoring >=3.0; see
-        # argus/decision/engine.py) before it will act at all. A SUSPICIOUS/monitor verdict — a
-        # single uncorroborated signal — is alerted on but never blocks: it stays under
-        # observation until either it escalates on its own evidence or CL-AFPE/Ollama clears it.
+        # unrecognized. Blocking needs an authorised decision (containment_gate.py): HIGH/
+        # CRITICAL and corroborated by >= 2 independent sources, or an owner-named single-signal
+        # exception. A one-source HIGH (an uncorroborated Suricata rule or geofence hit) or a
+        # SUSPICIOUS verdict is alerted on but never blocks.
         if pihole_enabled and target_domain and target_domain not in ("unknown", "-"):
-            if decision_state not in ("HIGH", "CRITICAL"):
+            if not authorization.authorized:
                 LOGGER.debug(
-                    "🛡️ [IPS] Pi-hole block withheld for %s: decision state '%s' has not reached "
-                    "HIGH/CRITICAL corroboration — monitoring only, no containment action taken.",
-                    target_domain, decision_state
+                    "🛡️ [IPS] Pi-hole block withheld for %s: the decision does not authorise containment "
+                    "(not corroborated, no single-signal exception) — monitoring only.", target_domain,
                 )
             else:
                 safe_domains = set(self.config.get("safe_domains", []))
                 is_domain_safe = (target_domain in safe_domains) or (ti_engine and ti_engine.is_allowlisted(target_domain))
 
-                if not is_domain_safe and interactive_mode:
+                if not is_domain_safe and interactive_mode and not authorization.operator:
                     # Interactive mode: a person approves every block (router isolation and the tarpit already waited;
                     # the domain block did not -- 2026-10-12). The engine offers it with an approval button.
                     result["pending_domain_block"] = target_domain
@@ -1004,15 +1006,25 @@ class IPSMitigator:
                     LOGGER.debug("Mitigation suppressed: %s is on the Global Trust/Safe list.", target_domain)
 
         ips_on = bool(self.config.get("ips_enabled", True))
+        # U1 (2026-10-14): one rule for both device-isolation mechanisms -- containment_gate.device_isolation_action().
+        # A window count (lateral moves, honeypot hits) no longer authorises anything on its own; the decision does.
+        isolation_action = device_isolation_action(
+            authorization, critical_device=is_critical_device, interactive_mode=interactive_mode,
+            released_recently=is_operator_released)
+        if authorization.single_signal and is_operator_released and isolation_action == ISOLATE:
+            LOGGER.critical("🚨 [%s] Device %s: single-signal exception during the release cooldown -- contained again.",
+                            authorization.basis, hostname)
+
         router_enabled = ips_on and bool(self.config.get("ips_router_enabled", False)) and not onboarding_active
-        if router_enabled and (risk_score >= 8.5 or lateral_threat):
-            if is_operator_released and not lateral_threat:
-                LOGGER.debug("🛡️ Router isolation suppressed for %s: Operator release cooldown active.", hostname)
-            elif (interactive_mode or is_critical_device) and not lateral_threat:
+        if router_enabled and risk_score >= 8.5:
+            if isolation_action == WITHHELD:
+                LOGGER.debug("🛡️ Router isolation withheld for %s (basis=%s, released recently=%s).",
+                             hostname, authorization.basis, is_operator_released)
+            elif isolation_action == APPROVAL:
+                result["pending_device_containment"] = True
                 LOGGER.info(
                     "🛡️ [%s] Router isolation for %s (device_type=%s) queued for Telegram approval.",
-                    "CRITICAL DEVICE" if is_critical_device and not interactive_mode else "INTERACTIVE MODE",
-                    hostname, device_type,
+                    "CRITICAL DEVICE" if is_critical_device else "INTERACTIVE MODE", hostname, device_type,
                 )
             elif mac_addr and mac_addr != "unknown":
                 # BUGFIX (2026-09-10, AUDIT_V14_REVIEW_RESPONSE.md §2.6): _isolate_device_router()
@@ -1028,9 +1040,8 @@ class IPSMitigator:
                 with self._lock:
                     already_isolated = mac_addr in self._router_isolated_devices
                 if not already_isolated:
-                    if is_operator_released and lateral_threat:
-                        LOGGER.critical("🚨 [LATERAL THREAT OVERRIDE] Device %s attempted internal port scan during release cooldown! Router isolation re-enforced.", hostname)
-                    LOGGER.critical("Extreme risk detected. Executing hardware router isolation for MAC %s.", mac_addr)
+                    LOGGER.critical("Executing hardware router isolation for MAC %s (basis=%s).",
+                                    mac_addr, authorization.basis)
                     success = self._isolate_device_router(mac=mac_addr, ip=client_ip, hostname=hostname, dev_id=dev_id, reason=f"Risk Score {risk_score:.1f}: {reason}")
                     if success:
                         graph_action_id = self._mirror_containment(
@@ -1054,14 +1065,15 @@ class IPSMitigator:
 
         tarpit_enabled = ips_on and bool(self.config.get("ips_tarpit_enabled", True)) and not onboarding_active
         is_sim = bool(self.config.get("simulation_mode", False))
-        if tarpit_enabled and (L2_AVAILABLE or is_sim) and (risk_score >= 9.0 or lateral_threat):
-            if is_operator_released and not lateral_threat:
-                LOGGER.debug("🛡️ Layer-2 Tarpit suppressed for %s: Operator release cooldown active.", client_ip)
-            elif (interactive_mode or is_critical_device) and not lateral_threat:
+        if tarpit_enabled and (L2_AVAILABLE or is_sim) and risk_score >= 9.0:
+            if isolation_action == WITHHELD:
+                LOGGER.debug("🛡️ Layer-2 Tarpit withheld for %s (basis=%s, released recently=%s).",
+                             client_ip, authorization.basis, is_operator_released)
+            elif isolation_action == APPROVAL:
+                result["pending_device_containment"] = True
                 LOGGER.info(
                     "🛡️ [%s] Layer-2 Tarpit for %s (device_type=%s) queued for Telegram approval.",
-                    "CRITICAL DEVICE" if is_critical_device and not interactive_mode else "INTERACTIVE MODE",
-                    client_ip, device_type,
+                    "CRITICAL DEVICE" if is_critical_device else "INTERACTIVE MODE", client_ip, device_type,
                 )
             else:
                 if not mac_addr or mac_addr == "unknown":
@@ -1075,9 +1087,8 @@ class IPSMitigator:
                         gid = (self._tarpit_active_targets.get(_key) or {}).get("_graph_action_id")
                         if gid:
                             result["actions"].append(gid)
-                        if is_operator_released and lateral_threat:
-                            LOGGER.critical("🚨 [LATERAL THREAT OVERRIDE] Device %s attempted internal port scan during release cooldown! Layer-2 Tarpit re-enforced.", hostname)
-                        LOGGER.critical("⚠️ [DUAL-STACK TARPIT] Trapped compromised device %s (%s) in Layer-2 isolation.", hostname, dev_id)
+                        LOGGER.critical("⚠️ [DUAL-STACK TARPIT] Trapped device %s (%s) in Layer-2 isolation (basis=%s).",
+                                        hostname, dev_id, authorization.basis)
         return result
 
     def operator_isolate_router(self, dev_id: str, ip: str, mac: str, hostname: str,

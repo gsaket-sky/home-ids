@@ -66,7 +66,7 @@ Release 14, Workstream 4 (2026-09-07): cross-device campaign correlation and
 GeoIP-enriched reporting are now both wired in.
 - Cross-device correlation: a structural gap, not a missing feature -- this script
   reviews a decision's PERSISTED graph evidence (window.evidence_in_window()), but
-  argus's own live decision path (live_engine.py's _inject_graph_derived_evidence())
+  argus's own live decision path (live_engine.py's _gather_graph_derived())
   deliberately NEVER persists its synthetic coordinated_targeting/first_contact/
   reputation-propagation evidence (writing it would recreate the exact
   evidence-duplication bug Phase 1's own incident already fixed). So a decision

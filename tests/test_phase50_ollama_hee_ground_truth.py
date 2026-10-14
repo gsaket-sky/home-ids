@@ -63,7 +63,8 @@ check("alert_payload persists hee_decision_path FROM the real `decision` dict",
       '"hee_decision_path": decision.get("decision_path", "")' in _pipeline_src)
 check("alert_payload persists hee_evidence_families derived FROM the real active_evidence "
       "list this cycle actually used to reach its verdict (not a static/empty list)",
-      "ev.independence_group for ev in active_evidence if ev.independence_group" in _pipeline_src)
+      '"hee_evidence_families": evidence_families_for_alert(' in _pipeline_src
+      and "active_evidence, decision.get(\"evidence_families\", [])" in _pipeline_src)
 
 print()
 if FAILURES:

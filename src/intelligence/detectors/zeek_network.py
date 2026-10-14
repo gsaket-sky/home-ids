@@ -32,7 +32,6 @@ class ZeekNetworkDetector:
                     device=device,
                     value=1.0,
                     confidence=evt.get("confidence", 0.95),
-                    independence_group="zeek_network",
                     provenance=f"detector:zeek:{evt_type}:{fingerprint_hash or 'unknown'}",
                     domain=evidence_target,
                 ))
@@ -69,7 +68,6 @@ class ZeekNetworkDetector:
                     device=device,
                     value=1.0,
                     confidence=ZEEK_NOTICE_TIER_CONFIDENCE[tier],
-                    independence_group="zeek_network",
                     provenance=f"detector:zeek:notice:{note_type}",
                     domain=evt.get("dest_ip") or None,
                 ))

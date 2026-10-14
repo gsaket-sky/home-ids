@@ -40,13 +40,11 @@ def convert(v1_evidence: Any, independence_family: str,
 
     independence_family is REQUIRED and passed explicitly by the caller (from
     hypotheses/independence.py's INDEPENDENCE_FAMILY_MAP, Phase 3) rather than
-    read off detector Evidence's own `independence_group` -- that field conflates "which family
-    this evidence belongs to for reporting" with what argus needs independence_family
-    to mean specifically ("what can legitimately corroborate this for scoring
-    purposes"), the exact Phase 64 category-error this project already hit once.
-    Reusing that value blindly would silently reintroduce that same conflation
-    into argus -- so it's never read from v1_evidence here, even though the field
-    exists and looks tempting to reuse.
+    read off the detector Evidence itself. (The detector Evidence's own free-form
+    `independence_group` field, which conflated "which family this belongs to for
+    reporting" with "what can legitimately corroborate this for scoring" -- the
+    Phase 64 category error -- was removed in W-13, 2026-10-14: the one registry is
+    hypotheses/independence.py, and callers pass family_for(type).)
 
     fallback_context, if given, may carry 'dest_ip' and/or 'dest_domain' -- checked
     only when v1_evidence.domain is None. Prefers dest_domain over dest_ip when

@@ -76,7 +76,7 @@ check("geofence-alone still authorizes a real action (alert), not silent",
 
 geofence_corroborated = fresh_store([
     Evidence(type="geofencing_violation", source="geoip", timestamp=time.time(), device="devB", value=1.0, confidence=1.0),
-    Evidence(type="arp_sweep", source="zeek", timestamp=time.time(), device="devB", value=12.0, confidence=0.9, independence_group="lan_recon"),
+    Evidence(type="arp_sweep", source="zeek", timestamp=time.time(), device="devB", value=12.0, confidence=0.9),
 ], "devB")
 result_corroborated = de.evaluate(geofence_corroborated, neutral_rep)
 check("geofence WITH real independent behavioral corroboration stays CRITICAL",
@@ -128,19 +128,19 @@ check("REGRESSION GUARD: the CL-AFPE's hard-stop signature set (mark-as-safe is 
 cah = ConnectionAbuseHypothesis()
 
 arp_only = [Evidence(type="arp_sweep", source="threat_signals", timestamp=time.time(),
-                      device="dev1", value=12.0, confidence=0.9, independence_group="lan_recon")]
+                      device="dev1", value=12.0, confidence=0.9)]
 cah.evaluate(arp_only, neutral_rep)
 check("THE CORE FIX (G7): arp_sweep ALONE (single category) -> INTERNAL_RECONNAISSANCE",
       cah.name == "INTERNAL_RECONNAISSANCE", f"got {cah.name}")
 
 scan_only = [Evidence(type="zeek_conn_abuse", source="threat_signals", timestamp=time.time(),
-                       device="dev1", value=40.0, confidence=0.9, independence_group="zeek_network")]
+                       device="dev1", value=40.0, confidence=0.9)]
 cah.evaluate(scan_only, neutral_rep)
 check("THE CORE FIX (G7): zeek_conn_abuse ALONE (single category) -> PORT_SCAN",
       cah.name == "PORT_SCAN", f"got {cah.name}")
 
 long_only = [Evidence(type="zeek_long_conn", source="threat_signals", timestamp=time.time(),
-                       device="dev1", value=1.0, confidence=0.9, independence_group="zeek_network")]
+                       device="dev1", value=1.0, confidence=0.9)]
 cah.evaluate(long_only, neutral_rep)
 check("zeek_long_conn ALONE (single category, not a scan/recon shape) stays CONNECTION_ABUSE",
       cah.name == "CONNECTION_ABUSE", f"got {cah.name}")
@@ -162,20 +162,20 @@ check("no evidence at all -> required_satisfied False, no name change forced (st
 nih = NetworkIntrusionHypothesis()
 
 lateral_only = [Evidence(type="zeek_lateral_scan", source="zeek", timestamp=time.time(),
-                          device="dev2", value=1.0, confidence=0.9, independence_group="zeek_network")]
+                          device="dev2", value=1.0, confidence=0.9)]
 nih.evaluate(lateral_only, neutral_rep)
 check("THE CORE FIX (G7): zeek_lateral_scan present -> LATERAL_MOVEMENT",
       nih.name == "LATERAL_MOVEMENT", f"got {nih.name}")
 
 tls_only = [Evidence(type="malicious_ja3", source="zeek", timestamp=time.time(),
-                      device="dev2", value=1.0, confidence=0.95, independence_group="zeek_network")]
+                      device="dev2", value=1.0, confidence=0.95)]
 nih.evaluate(tls_only, neutral_rep)
 check("malicious_ja3 alone (no lateral scan) stays NETWORK_INTRUSION",
       nih.name == "NETWORK_INTRUSION", f"got {nih.name}")
 
 lateral_plus_tls = lateral_only + tls_only + [
     Evidence(type="malicious_ja4", source="zeek", timestamp=time.time(), device="dev2",
-             value=1.0, confidence=0.95, independence_group="zeek_network"),
+             value=1.0, confidence=0.95),
 ]
 nih.evaluate(lateral_plus_tls, neutral_rep)
 check("REGRESSION GUARD: lateral scan alongside OTHER corroborating evidence still "

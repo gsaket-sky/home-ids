@@ -2095,7 +2095,7 @@ class GraphStore:
         full-table-scan-in-Python rationale as get_devices_with_metadata_value()
         above, but groups every device by its own metadata_json['device_type']
         in ONE pass instead of requiring a separate scan per device_type.
-        live_engine.py's _inject_peer_deviation_evidence() was calling
+        live_engine.py's _gather_peer_stats() was calling
         get_devices_with_metadata_value() once per device per decision cycle --
         for a cycle that visits every device, that's N redundant full scans of
         this SAME table per cycle. This lets that caller do one scan per cycle
@@ -2453,6 +2453,39 @@ class GraphStore:
         ).fetchone()
         return None if row is None else {"state": row["state"], "timestamp": row["timestamp"]}
 
+    def get_incident_status(self, device_id: str, incident_states, resolve_merges: bool = True) -> Dict[str, Any]:
+        """Where the device stands relative to its incidents, from its decision rows:
+        {"in_incident": its newest row is one of `incident_states`,
+         "incident_ended_at": when its most recent incident ended -- the timestamp of the first row after the newest
+             incident row, whatever that row is (None while still in an incident, and None when it never had one)}.
+        Rows are written when the verdict changes AND for a device's first decision and its first cycle after each
+        service restart, so the newest row's timestamp is not "when the last incident ended" -- this is."""
+        if resolve_merges:
+            device_ids = self._all_ids_resolving_to(self.resolve_canonical_device_id(device_id))
+        else:
+            device_ids = [device_id]
+        ids = ",".join("?" * len(device_ids))
+        states = sorted(incident_states)
+        marks = ",".join("?" * len(states))
+        latest = self._conn.execute(
+            f"SELECT state FROM decisions WHERE device_id IN ({ids}) ORDER BY timestamp DESC LIMIT 1", device_ids,
+        ).fetchone()
+        if latest is None:
+            return {"in_incident": False, "incident_ended_at": None}
+        if latest["state"] in states:
+            return {"in_incident": True, "incident_ended_at": None}
+        last_incident = self._conn.execute(
+            f"SELECT MAX(timestamp) AS ts FROM decisions WHERE device_id IN ({ids}) AND state IN ({marks})",
+            device_ids + states,
+        ).fetchone()["ts"]
+        if last_incident is None:
+            return {"in_incident": False, "incident_ended_at": None}
+        ended = self._conn.execute(
+            f"SELECT MIN(timestamp) AS ts FROM decisions WHERE device_id IN ({ids}) AND timestamp > ?",
+            device_ids + [last_incident],
+        ).fetchone()["ts"]
+        return {"in_incident": False, "incident_ended_at": ended}
+
     def get_recent_decisions(self, limit: int, device_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """The console API's graph-view endpoint's actual read pattern: the most
         recent `limit` decisions across ALL devices, newest first -- NOT "every
@@ -2528,7 +2561,7 @@ class GraphStore:
         was being returned straight from the devices table's own COLUMN, which nothing
         on the live per-cycle write path ever populates -- confirmed live: 0 of 152 real
         devices on .94 had it set. The real value lives in metadata_json['device_type']
-        (written by live_engine.py's _inject_peer_deviation_evidence(), same field
+        (written by live_engine.py's _gather_peer_stats(), same field
         get_devices_with_metadata_value()/get_device_type_cohorts() above already read
         from) -- this method just wasn't looking there, so the console silently lost a
         device_type it actually had on record for any device StateManager's own live

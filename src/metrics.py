@@ -121,7 +121,8 @@ ips_errors_metric = Counter("home_ids_ips_errors_total", "Total failure states e
 ips_pihole_unblocks_metric = Counter("home_ids_ips_pihole_unblocks_total", "Total automated/manual domain releases executed", ["device", "hostname", "reason"])
 ips_router_releases_metric = Counter("home_ids_ips_router_releases_total", "Total router isolation releases executed", ["device", "hostname", "reason"])
 
-new_domains_metric = Gauge("home_ids_new_domains", "Domains seen for the first time this window", _DEV_LABELS)
+# U4 (2026-10-14): a domain is learned as normal only after an hour of benign sightings, so "new" means "not yet learned".
+new_domains_metric = Gauge("home_ids_new_domains", "Domains in the current window not yet learned as normal for this device (learned after 1 h of benign sightings)", _DEV_LABELS)
 deep_domains_metric = Gauge("home_ids_deep_domains", "Domains with > 5 DNS labels", _DEV_LABELS)
 nxdomain_tld_conc_metric = Gauge("home_ids_nxdomain_tld_concentration", "Fraction of traffic under top TLD", _DEV_LABELS)
 zscore_nxdomain_metric = Gauge("home_ids_zscore_nxdomain_ratio", "NXDOMAIN ratio z-score", _DEV_LABELS)

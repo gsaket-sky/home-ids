@@ -44,7 +44,8 @@ def check(label: str, condition: bool) -> None:
 
 
 from core.pipeline import _EVIDENCE_PLAIN_LANGUAGE, _EVIDENCE_FAMILY_LABELS  # noqa: E402
-from intelligence.hypotheses.evidence import EVIDENCE_FAMILIES  # noqa: E402
+from argus.hypotheses.independence import INDEPENDENCE_FAMILY_MAP  # noqa: E402
+EVIDENCE_FAMILIES = frozenset(INDEPENDENCE_FAMILY_MAP.values())   # W-13: the one registry's families
 
 
 def _extract_literal_evidence_types() -> set:

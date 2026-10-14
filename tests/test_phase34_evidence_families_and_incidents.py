@@ -56,22 +56,18 @@ def check(name, cond, detail=""):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════
-# Section A: evidence.py -- EVIDENCE_FAMILIES / ATTACK_EVIDENCE_FAMILIES registry
+# Section A: the one family registry (argus/hypotheses/independence.py) -- W-13, 2026-10-14. This section used to test
+# evidence.py's second registry (EVIDENCE_FAMILIES / ATTACK_EVIDENCE_FAMILIES), which no longer exists.
 # ═══════════════════════════════════════════════════════════════════════════════════
-from intelligence.hypotheses.evidence import EVIDENCE_FAMILIES, ATTACK_EVIDENCE_FAMILIES
+from argus.hypotheses.independence import INDEPENDENCE_FAMILY_MAP, NON_ATTACK_FAMILIES, family_for
 
-_EXPECTED_FAMILIES = {
-    "dns_behavior", "dns_tunnel_v2", "zeek_network", "lan_recon", "blindspot_audit",
-    "honeypot", "ml_anomaly", "local_context", "reputation",
-}
-check("EVIDENCE_FAMILIES contains every independence_group value actually used across "
-      "the codebase's detectors",
-      _EXPECTED_FAMILIES.issubset(EVIDENCE_FAMILIES), f"missing={_EXPECTED_FAMILIES - EVIDENCE_FAMILIES}")
-check("THE CORE FIX: lan_recon (arp_sweep's family) is a recognized attack-relevant family",
-      "lan_recon" in ATTACK_EVIDENCE_FAMILIES)
-check("local_context (local_device_discovery, benign-only) is deliberately excluded from "
-      "ATTACK_EVIDENCE_FAMILIES -- it must never corroborate an attack verdict",
-      "local_context" not in ATTACK_EVIDENCE_FAMILIES and "local_context" in EVIDENCE_FAMILIES)
+_ATTACK_FAMILIES = set(INDEPENDENCE_FAMILY_MAP.values()) - set(NON_ATTACK_FAMILIES)
+check("THE CORE FIX: arp_sweep (family network_recon) is an attack-relevant family that counts toward corroboration",
+      family_for("arp_sweep") in _ATTACK_FAMILIES)
+check("local_context (local_device_discovery, benign-only) is excluded from the attack families -- it must never "
+      "corroborate an attack verdict",
+      family_for("local_device_discovery") == "local_context" and "local_context" in NON_ATTACK_FAMILIES
+      and "local_context" not in _ATTACK_FAMILIES)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════
@@ -85,21 +81,21 @@ de = DecisionEngine()
 rep = ReputationVector(domain="unknown", tier=3)
 NOW = time.time()
 
-def _ev(etype, group, value=10.0, confidence=0.85):
+def _ev(etype, value=10.0, confidence=0.85):   # W-13: the family comes from the type
     return Evidence(type=etype, source="test", timestamp=NOW, device="d1", value=value,
-                     confidence=confidence, independence_group=group)
+                     confidence=confidence)
 
 # THE CORE FIX: arp_sweep (lan_recon) + a second family now correctly count as 2
 # independent sources -- before the fix, arp_sweep was silently excluded, so this same
 # evidence set would have counted as only 1.
-result_arp = de.evaluate([_ev("arp_sweep", "lan_recon"), _ev("zeek_conn_abuse", "zeek_network")], rep)
+result_arp = de.evaluate([_ev("arp_sweep"), _ev("zeek_conn_abuse")], rep)
 check("THE CORE FIX: arp_sweep (lan_recon family) now counts toward independent sources",
       result_arp["independent_sources"] == 2, f"got {result_arp['independent_sources']}")
 
 # arp_sweep ALONE (only 1 family) should NOT be enough to reach HIGH on its own (needs
 # 2+ independent sources per decision_engine.py's own bar) -- regression guard that the
 # fix didn't accidentally make a single arp_sweep hit over-authorize.
-result_arp_alone = de.evaluate([_ev("arp_sweep", "lan_recon", value=10.0)], rep)
+result_arp_alone = de.evaluate([_ev("arp_sweep", value=10.0)], rep)
 check("REGRESSION GUARD: arp_sweep alone (1 family) still only reaches 1 independent "
       "source, not enough alone to authorize HIGH",
       result_arp_alone["independent_sources"] == 1)
@@ -107,14 +103,14 @@ check("REGRESSION GUARD: arp_sweep alone (1 family) still only reaches 1 indepen
 # REGRESSION GUARD: local_device_discovery (benign, local_context) never counts toward
 # ATTACK corroboration, before or after the fix.
 result_benign_mixed = de.evaluate(
-    [_ev("arp_sweep", "lan_recon"), _ev("local_device_discovery", "local_context", value=1.0)], rep)
+    [_ev("arp_sweep"), _ev("local_device_discovery", value=1.0)], rep)
 check("REGRESSION GUARD: local_device_discovery (local_context) still never counts "
       "toward independent attack-evidence sources",
       result_benign_mixed["independent_sources"] == 1, f"got {result_benign_mixed['independent_sources']}")
 
 # REGRESSION GUARD: every other pre-existing family still counts exactly as before.
 result_dns_zeek_rep = de.evaluate(
-    [_ev("dns_entropy", "dns_behavior"), _ev("zeek_lateral_scan", "zeek_network"), _ev("reputation", "reputation")], rep)
+    [_ev("dns_entropy"), _ev("zeek_lateral_scan"), _ev("reputation")], rep)
 check("REGRESSION GUARD: dns_behavior + zeek_network + reputation still count as 3 "
       "independent sources, unaffected by the filter rewrite",
       result_dns_zeek_rep["independent_sources"] == 3, f"got {result_dns_zeek_rep['independent_sources']}")
@@ -123,7 +119,7 @@ check("REGRESSION GUARD: dns_behavior + zeek_network + reputation still count as
 # but ARE independence_group="zeek_network") still count -- these only ever worked via
 # the group-membership path, never the type-prefix path, so a filter rewrite that
 # dropped group-membership entirely would have silently broken them.
-result_ja3 = de.evaluate([_ev("malicious_ja3", "zeek_network"), _ev("arp_sweep", "lan_recon")], rep)
+result_ja3 = de.evaluate([_ev("malicious_ja3"), _ev("arp_sweep")], rep)
 check("REGRESSION GUARD: malicious_ja3 (zeek_network family, type doesn't start with "
       "'zeek') still counts toward independent sources",
       result_ja3["independent_sources"] == 2, f"got {result_ja3['independent_sources']}")

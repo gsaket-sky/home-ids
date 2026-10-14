@@ -92,8 +92,8 @@ at_threshold = detector.detect("dev1", {"zeek_arp_sweep_count": 8}, arp_sweep_th
 arp_ev = [e for e in at_threshold if e.type == "arp_sweep"]
 check("at threshold (8 >= 8) -> arp_sweep evidence fires", len(arp_ev) == 1)
 if arp_ev:
-    check("arp_sweep evidence lands in the lan_recon independence group",
-          arp_ev[0].independence_group == "lan_recon")
+    check("arp_sweep evidence lands in the network_recon family (the one registry, W-13)",
+          arp_ev[0].family == "network_recon")
 
 well_above = detector.detect("dev1", {"zeek_arp_sweep_count": 40}, arp_sweep_threshold=8)
 well_above_ev = [e for e in well_above if e.type == "arp_sweep"][0]
@@ -114,7 +114,7 @@ no_evidence = hyp.evaluate([], neutral_rep)
 check("no evidence at all -> hypothesis doesn't fire", no_evidence == 0.0)
 
 arp_only = [Evidence(type="arp_sweep", source="threat_signals", timestamp=time.time(),
-                      device="dev1", value=12.0, confidence=0.7, independence_group="lan_recon")]
+                      device="dev1", value=12.0, confidence=0.7)]
 score_arp_only = hyp.evaluate(arp_only, neutral_rep)
 check("THE CORE FIX: arp_sweep ALONE satisfies the hypothesis's required condition "
       "(previously only zeek_conn_abuse/zeek_long_conn could)",
@@ -124,7 +124,7 @@ check("arp_sweep alone (one category) does not reach the 'strong' bonus score",
 
 both_categories = arp_only + [
     Evidence(type="zeek_conn_abuse", source="threat_signals", timestamp=time.time(),
-             device="dev1", value=30.0, confidence=0.8, independence_group="zeek_network"),
+             device="dev1", value=30.0, confidence=0.8),
 ]
 score_both = hyp.evaluate(both_categories, neutral_rep)
 check("arp_sweep + zeek_conn_abuse (two categories) reaches 3.0 but not the 4.0 ceiling: co-occurrence alone is "
@@ -139,7 +139,7 @@ check("a tier-1/2 trusted device's arp_sweep is dampened by the contradicting-sc
 
 # ═══════════════════════════════════════════════════════════════════════════════════
 # BUGFIX regression guards (found via a live state-folder audit, post-v9.0.0 restart):
-# arp_sweep evidence (independence_group="lan_recon", added in Phase 21B) was never
+# arp_sweep evidence (added in Phase 21B) was never
 # added to pipeline.py's two existing "dampen behavioral noise for infrastructure"
 # exclusion sets, both written before arp_sweep existed. A router/gateway ARPs its
 # entire LAN as routine DHCP/ARP-table/mesh-sync behavior -- confirmed live: this
@@ -154,18 +154,19 @@ check("a tier-1/2 trusted device's arp_sweep is dampened by the contradicting-sc
 # ═══════════════════════════════════════════════════════════════════════════════════
 _pipeline_src = (_PathForSysPath(__file__).resolve().parent.parent / "src" / "core" / "pipeline.py").read_text(encoding="utf-8")
 
-check("THE FIX: the is_safe noisy_types set now includes 'lan_recon' (arp_sweep's "
-      "independence_group), alongside the pre-existing zeek_network/dns/ml_anomaly "
-      "exclusions",
-      'noisy_types = {"ml_anomaly", "dns_rate", "dns_entropy", "dns_unique_ratio", "zeek_network", "lan_recon", "dns_evasion_anomaly"}' in _pipeline_src)
+from intelligence.hypotheses.evidence import SAFE_DEVICE_DAMPENED_TYPES  # noqa: E402
+check("THE FIX: the safe-device noise filter drops arp_sweep (and arp_spoof_pending) alongside the zeek/dns/ml "
+      "evidence, by type (W-13: it was a group-name set containing 'lan_recon')",
+      {"arp_sweep", "arp_spoof_pending", "zeek_conn_abuse", "dns_rate", "ml_anomaly"} <= SAFE_DEVICE_DAMPENED_TYPES
+      and "ev.type not in SAFE_DEVICE_DAMPENED_TYPES" in _pipeline_src)
 check("THE FIX: the sibling _INFRA_NOISY_TYPES set (operator-confirmed infra devices) "
       "now includes 'arp_sweep' too",
       '"arp_sweep"' in _pipeline_src.split("_INFRA_NOISY_TYPES = {")[1].split("}")[0])
 check("THE FIX: the ARP-spoofing hard-stop Evidence injection is now gated on "
-      "'if is_safe:' (skip) / else (inject) -- a safe_ips-listed IP's own MAC-flip "
+      "'if is_ip_verified_safe:' (skip) / else (inject) -- a safe_ips-listed IP's own MAC-flip "
       "heuristic no longer bypasses the same trust promise every other behavioral "
       "signal already honors",
-      "if is_safe:" in _pipeline_src.split('LOGGER.critical(f"Adding HARD-STOP evidence for ARP Spoofing')[0][-400:])
+      "if is_ip_verified_safe:" in _pipeline_src.split('LOGGER.critical(f"Adding HARD-STOP evidence for ARP Spoofing')[0][-400:])
 check("REGRESSION GUARD: the ARP-spoofing hard-stop Evidence is still actually added "
       "for the non-safe case (the fix must not have deleted real detection)",
       'self.evidence_store.add(Evidence(type="arp_spoofing"' in _pipeline_src)

@@ -3,48 +3,34 @@ argus/shadow/sandbox.py -- Deterministic shadow evaluation (Phase 7 of the
 autonomy-completion effort, 2026-09-27, Documentation/ARGUS_AUTONOMY_DEPENDENCY_MAP.md).
 
 WHAT THIS IS: for a currently-in-canary autotune candidate (a threshold_history row
-with promoted_at IS NULL, rolled_back_at IS NULL, canary_until > now), re-runs THIS
-cycle's real decision inputs through the SAME real decision path
-(argus/ops/live_engine.py's evaluate()) with ONLY that one candidate value
-substituted, and compares the resulting state against what the real value actually
-produced -- without ever sending an alert, without ever leaving a trace in the real
-graph.
+with promoted_at IS NULL, rolled_back_at IS NULL, canary_until > now), re-decides THIS
+cycle with ONLY that one candidate value substituted, and records whether the resulting
+state agrees with the real decision's.
 
-HOW SAFETY IS ACTUALLY GUARANTEED, confirmed via direct investigation, not assumed:
-live_engine.evaluate() is NOT a pure function when given a device_id -- it reads AND
-WRITES the graph (evidence/decisions rows, device metadata) as a real side effect of
-computing a decision (this is needed for several of the 16 parameters, e.g.
-hard_stop_candidate_sensitivity/familiarity_trust_bar/reputation floors, which are
-only resolved inside evaluate()'s own `if device_id:` block). Re-invoking it a second
-time for shadow purposes therefore risks REAL, PERMANENT double-writes (duplicate
-evidence/decisions rows, double-counted peer-cohort baselines) unless something
-prevents that. This module does NOT refactor evaluate() to separate pure computation
-from persistence (a much larger, riskier change) and does NOT swap in an isolated
-clone of the graph (which would make the shadow call see slightly stale/incomplete
-input compared to the real decision's own frozen snapshot). Instead: the ENTIRE
-shadow evaluate() call is wrapped in a real GraphStore transaction() that is always,
-unconditionally rolled back via an internal sentinel exception once the shadow
-decision has been read out -- every write evaluate() makes during the shadow call is
-undone before this function returns, regardless of what it wrote or how, with zero
-changes to evaluate() itself. GraphStore.transaction()'s own docstring confirms this
-is safe to nest arbitrarily (a no-op passthrough when already inside one) OR to be
-the outermost transaction (confirmed via direct grep: core/pipeline.py never calls
-store.transaction() itself, so this call is always the real outermost one in
-practice, and the rollback is real).
+HOW (U7, 2026-10-14, DETECTION_CORE_REWORK section I): live_engine splits a cycle into
+gather (impure, once: graph reads, the stateful baseline/Markov learners), decide (pure)
+and commit (graph writes, per-device bookkeeping). The shadow is live_engine.decide() on
+the real cycle's own GatheredCycle with the real decision's champion DecisionParameters,
+one field replaced -- it reads nothing new and writes nothing but its own shadow_decisions
+row. Before, it re-ran the whole evaluate() inside a graph transaction it rolled back; the
+rollback undid graph rows only, while the in-memory learners had observed the cycle again
+and the device's "last decision" bookkeeping took the shadow's values (U7's defect).
 
-Alert/mitigation isolation is simpler and doesn't need a special guard: alerting and
-containment are decided in core/pipeline.py AFTER evaluate() returns, never inside
-evaluate() itself -- this module's own caller (maybe_shadow_evaluate() below) only
-ever calls evaluate() and records a comparison, never touches alert_manager/
-ips_mitigator at all, so there is no code path by which a shadow evaluation could
-reach either.
+WHICH PARAMETERS: only live_engine.DECIDE_PARAMETERS -- the ones decide() reads. A
+candidate for any other tunable (one acting in a stateful learner, a detector or the
+false-positive engine) is not shadow-compared per cycle: re-deciding a cycle cannot show
+its effect, and the rows this module used to write for them were trivially "agree".
+
+Alerting and containment are decided in core/pipeline.py after the real decision; this
+module never reaches alert_manager or ips_mitigator.
 """
 import logging
 import time
 import uuid
 from typing import Any, Dict, List, Optional
 
-from argus.autotune.engine import shadow_override
+import dataclasses
+
 from argus.graph.store import GraphStore
 from metrics import shadow_eval_comparisons_total, shadow_eval_errors_total, shadow_eval_paused
 from utils import is_resource_pressure_active_in_process
@@ -61,12 +47,6 @@ _ACTIVE_CANARIES_REFRESH_SECONDS = 300.0
 # pattern rotate_jsonl_if_oversized() uses for size-capped files), not a separate
 # scheduled job.
 _MAX_SHADOW_DECISIONS = 5000
-
-
-class _ShadowAbort(Exception):
-    """Internal sentinel only -- raised inside the shadow transaction to force an
-    unconditional rollback of every write the shadow evaluate() call made, caught
-    immediately by the same function that raises it, never propagated further."""
 
 
 def _active_canary_rows(store: GraphStore, now: float) -> List[Dict[str, Any]]:
@@ -103,51 +83,34 @@ def _record_shadow_decision(store: GraphStore, change_id: str, device_id: Option
 
 
 def evaluate_candidate_shadow(store: GraphStore, change_id: str, parameter: str, candidate_value: float,
-                                 device_id: Optional[str], device_type: str,
-                                 active_evidence_v1: List, rep_vector, features: Optional[dict],
-                                 is_safe: bool, baseline_familiarity: float, real_state: str,
-                                 now: float) -> Optional[bool]:
-    """Runs ONE shadow comparison for a single currently-in-canary change against
-    THIS cycle's real inputs. Returns True/False (agreement) or None if the shadow
-    call itself failed (logged, counted, never raised to the caller -- a shadow
-    failure must never affect the real decision this cycle already produced).
+                                 cycle, real_state: str, now: float) -> Optional[bool]:
+    """Runs ONE shadow comparison for a single currently-in-canary change on the real
+    cycle `cycle` (live_engine.EvaluatedCycle: its gathered facts and champion parameters).
+    Returns True/False (agreement), or None when the parameter is not a decide-stage one
+    or the shadow decide failed (logged, counted, never raised -- a shadow failure must
+    never affect the real decision this cycle already produced).
 
-    `real_state` is the REAL decision's own `state` for this exact cycle, already
-    computed by the caller -- never recomputed here, so the comparison is always
-    against the actual thing that governed this cycle's real alert/mitigation
-    behavior, not a second, possibly-different real evaluation."""
+    `real_state` is the REAL decision's own state for this cycle, never recomputed here."""
     import argus.ops.live_engine as live_engine  # local import: avoids a live_engine <-> shadow.sandbox import cycle
 
-    # The candidate value is visible to this thread only (shadow_override() sets a
-    # ContextVar). Patching AutotuneEngine.get_active_value on the class, as this
-    # did before, let every other thread read the candidate while the call ran
-    # (runtime trace run 2, finding 4.4).
-    shadow_state: Optional[str] = None
+    if parameter not in live_engine.DECIDE_PARAMETERS:
+        return None
     try:
-        with shadow_override(parameter, candidate_value):
-            try:
-                with store.transaction():
-                    shadow_decision = live_engine.evaluate(
-                        active_evidence_v1, rep_vector, device_type=device_type,
-                        baseline_familiarity=baseline_familiarity, features=features, is_safe=is_safe,
-                        device_id=device_id, now=now,
-                    )
-                    shadow_state = shadow_decision.get("state")
-                    raise _ShadowAbort()
-            except _ShadowAbort:
-                pass
+        params = dataclasses.replace(cycle.params, **{parameter: float(candidate_value)})
+        shadow_decision, _merged = live_engine.decide(cycle.gathered, params)
+        shadow_state = shadow_decision.get("state")
     except Exception:
-        LOGGER.exception("[SHADOW_EVAL] shadow evaluate() failed for change_id=%r parameter=%r "
-                           "device_id=%r, non-fatal, no comparison recorded", change_id, parameter, device_id)
+        LOGGER.exception("[SHADOW_EVAL] shadow decide() failed for change_id=%r parameter=%r "
+                           "device_id=%r, non-fatal, no comparison recorded",
+                           change_id, parameter, cycle.gathered.device_id)
         shadow_eval_errors_total.inc()
-        shadow_state = None
-
+        return None
     if shadow_state is None:
         return None
 
     agree = shadow_state == real_state
     try:
-        _record_shadow_decision(store, change_id, device_id, now, real_state, shadow_state)
+        _record_shadow_decision(store, change_id, cycle.gathered.device_id, now, real_state, shadow_state)
     except Exception:
         LOGGER.exception("[SHADOW_EVAL] failed to record shadow_decisions row (non-fatal)")
     shadow_eval_comparisons_total.labels(parameter=parameter, agree=str(agree)).inc()
@@ -175,10 +138,7 @@ class ShadowEvaluator:
             self._active_canaries = _active_canary_rows(self.store, now)
             self._cache_refreshed_at = now
 
-    def maybe_shadow_evaluate(self, device_id: Optional[str], device_type: str,
-                                 active_evidence_v1: List, rep_vector, features: Optional[dict],
-                                 is_safe: bool, baseline_familiarity: float, real_state: str,
-                                 now: Optional[float] = None) -> None:
+    def maybe_shadow_evaluate(self, cycle, real_state: str, now: Optional[float] = None) -> None:
         """Best-effort, called once per real decision cycle from core/pipeline.py -- shadow-
         tests AT MOST ONE currently-active canary per call (the first one whose
         scope matches this device/category, or a global one), keeping per-cycle
@@ -187,13 +147,18 @@ class ShadowEvaluator:
         cycle it's riding alongside."""
         now = now if now is not None else time.time()
         try:
+            import argus.ops.live_engine as live_engine  # local import, see evaluate_candidate_shadow()
+            device_id = cycle.gathered.device_id
+            device_type = cycle.gathered.device_type
             if is_resource_pressure_active_in_process():
                 shadow_eval_paused.set(1)
                 return
             shadow_eval_paused.set(0)
 
             self._refresh_if_stale(now)
-            if not self._active_canaries:
+            # Only decide-stage parameters can be compared by re-deciding a cycle (module docstring).
+            canaries = [row for row in self._active_canaries if row["parameter"] in live_engine.DECIDE_PARAMETERS]
+            if not canaries:
                 return
 
             # Device-scoped beats category-scoped beats global, regardless of which
@@ -205,25 +170,25 @@ class ShadowEvaluator:
             # matched FIRST in row order, not the most specific one, whenever a
             # broader-scoped canary happened to be scanned first.
             candidate = None
-            for row in self._active_canaries:
+            for row in canaries:
                 if row["device_id"] is not None and row["device_id"] == device_id:
                     candidate = row
                     break
             if candidate is None:
-                for row in self._active_canaries:
+                for row in canaries:
                     if row["device_id"] is None and row["device_type"] is not None and row["device_type"] == device_type:
                         candidate = row
                         break
             if candidate is None:
-                for row in self._active_canaries:
+                for row in canaries:
                     if row["device_id"] is None and row["device_type"] is None:
                         candidate = row
                         break
             if candidate is None:
                 return
 
-            # A shadow comparison is a full second evaluate(); one sample per device per interval is plenty for a
-            # canary that lasts hours, and it was ~30% of the engine loop when run every cycle.
+            # One sample per device per interval is plenty for a canary that lasts hours (a full second evaluate()
+            # was ~30% of the engine loop when run every cycle; decide() alone is far cheaper, the cap stays).
             key = device_id or ""
             last = self._last_eval.get(key)
             if last is not None and now - last < _SHADOW_EVAL_MIN_INTERVAL_SECONDS:
@@ -235,8 +200,7 @@ class ShadowEvaluator:
 
             evaluate_candidate_shadow(
                 self.store, candidate["change_id"], candidate["parameter"], candidate["new_value"],
-                device_id, device_type, active_evidence_v1, rep_vector, features, is_safe,
-                baseline_familiarity, real_state, now,
+                cycle, real_state, now,
             )
         except Exception:
             LOGGER.exception("[SHADOW_EVAL] maybe_shadow_evaluate() failed (non-fatal, real decision unaffected)")

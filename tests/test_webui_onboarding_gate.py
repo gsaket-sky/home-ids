@@ -56,6 +56,7 @@ check("activate_protection_now() is idempotent (activated_at doesn't move)",
 # ── mitigate()'s onboarding gate actually withholds action ──────────────────
 import types
 from mitigation.ips import IPSMitigator
+from mitigation.containment_gate import MONITOR_ONLY, ContainmentAuthorization  # noqa: E402
 
 state_dir_d = str(_PathForSysPath(_tmp) / "d")
 _PathForSysPath(state_dir_d).mkdir(parents=True, exist_ok=True)
@@ -90,8 +91,8 @@ fake_device = types.SimpleNamespace(
 # test only needs to isolate the Pi-hole path, not exercise router/tarpit's own
 # StateManager persistence calls, which need a fuller fake than this test provides.
 mitigator.mitigate(
-    st=fake_device, target_domain="evil.example", risk_score=5.0, lateral_threat=False,
-    is_safe=False, reason="test", decision_state="CRITICAL",
+    st=fake_device, target_domain="evil.example", risk_score=5.0, authorization=ContainmentAuthorization("corroborated"),
+    is_safe=False, reason="test",
 )
 check("onboarding-active mitigate() withholds Pi-hole block", len(blocked_calls) == 0,
       f"got {len(blocked_calls)} block call(s)")
@@ -99,8 +100,8 @@ check("onboarding-active mitigate() withholds Pi-hole block", len(blocked_calls)
 # Now end onboarding and confirm the SAME call actually blocks
 activate_protection_now(state_dir_d)
 mitigator.mitigate(
-    st=fake_device, target_domain="evil.example", risk_score=5.0, lateral_threat=False,
-    is_safe=False, reason="test", decision_state="CRITICAL",
+    st=fake_device, target_domain="evil.example", risk_score=5.0, authorization=ContainmentAuthorization("corroborated"),
+    is_safe=False, reason="test",
 )
 check("post-onboarding mitigate() blocks normally", len(blocked_calls) == 1,
       f"got {len(blocked_calls)} block call(s)")

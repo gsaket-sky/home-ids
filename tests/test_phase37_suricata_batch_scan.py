@@ -49,7 +49,7 @@ from intelligence.detectors.suricata_scan import (
     suricata_alerts_to_evidence,
 )
 from argus_scenarios import SuricataSignatureHypothesis, HypothesisEngine
-from intelligence.hypotheses.evidence import Evidence, EvidenceStore, EVIDENCE_FAMILIES, ATTACK_EVIDENCE_FAMILIES
+from intelligence.hypotheses.evidence import Evidence, EvidenceStore
 from intelligence.reputation.classifier import ReputationVector
 from argus_scenarios import DecisionEngine
 
@@ -250,8 +250,8 @@ check("severity=1 (Suricata 'high') maps to confidence 0.95",
       sev1_ev.confidence == 0.95, f"got {sev1_ev.confidence}")
 check("Evidence.type is suricata_signature_match",
       sev1_ev.type == "suricata_signature_match")
-check("Evidence.independence_group is 'suricata'",
-      sev1_ev.independence_group == "suricata")
+check("Evidence family is 'signature_match' (the one registry, W-13)",
+      sev1_ev.family == "signature_match")
 check("Evidence.domain carries the external target IP, not the tracked device's own IP",
       sev1_ev.domain == "203.0.113.10", f"got {sev1_ev.domain}")
 check("Evidence.provenance carries signature_id/category/signature for audit-trail readability",
@@ -278,13 +278,13 @@ trusted_rep = ReputationVector(domain="", tier=1)
 check("no evidence at all -> hypothesis doesn't fire", hyp.evaluate([], neutral_rep) == 0.0)
 
 single_hit = [Evidence(type="suricata_signature_match", source="suricata", timestamp=time.time(),
-                        device="dev1", value=1.0, confidence=0.7, independence_group="suricata")]
+                        device="dev1", value=1.0, confidence=0.7)]
 score_single = hyp.evaluate(single_hit, neutral_rep)
 check("a single moderate-confidence hit satisfies the required condition (score >= 2.0)",
       score_single >= 2.0, f"got {score_single}")
 
 two_hits = single_hit + [Evidence(type="suricata_signature_match", source="suricata", timestamp=time.time(),
-                                   device="dev1", value=1.0, confidence=0.95, independence_group="suricata")]
+                                   device="dev1", value=1.0, confidence=0.95)]
 score_two = hyp.evaluate(two_hits, neutral_rep)
 check("2+ distinct signature matches reach the 'strong' bonus score (4.0)",
       score_two == 4.0, f"got {score_two}")
@@ -303,7 +303,7 @@ check("SuricataSignatureHypothesis is registered in HypothesisEngine.attack_hypo
 de = DecisionEngine()
 store = EvidenceStore()
 store.add(Evidence(type="suricata_signature_match", source="suricata", timestamp=time.time(),
-                    device="dev_exploit", value=1.0, confidence=0.95, independence_group="suricata"))
+                    device="dev_exploit", value=1.0, confidence=0.95))
 decision_high_sev = de.evaluate(store.get_for_device("dev_exploit"), ReputationVector(domain="", tier=3))
 check("a lone severity=1/confidence>=0.9 Suricata match (no second evidence family) is HIGH/alert, never an "
       "automatic block -- one rule match can be a noisy false positive",
@@ -313,9 +313,9 @@ check("the uncorroborated hard-stop path is recorded as such",
       decision_high_sev["decision_path"] == "suricata_uncorroborated", f"got {decision_high_sev['decision_path']}")
 store_corr = EvidenceStore()
 store_corr.add(Evidence(type="suricata_signature_match", source="suricata", timestamp=time.time(),
-                        device="dev_exploit2", value=1.0, confidence=0.95, independence_group="suricata"))
+                        device="dev_exploit2", value=1.0, confidence=0.95))
 store_corr.add(Evidence(type="zeek_lateral_scan", source="zeek", timestamp=time.time(),
-                        device="dev_exploit2", value=40.0, confidence=0.9, independence_group="zeek_network"))
+                        device="dev_exploit2", value=40.0, confidence=0.9))
 decision_corr = de.evaluate(store_corr.get_for_device("dev_exploit2"), ReputationVector(domain="", tier=3))
 check("the same match corroborated by an independent evidence family (lateral scanning) is CRITICAL/block",
       decision_corr["state"] == "CRITICAL" and decision_corr["action"] == "block",
@@ -323,7 +323,7 @@ check("the same match corroborated by an independent evidence family (lateral sc
 
 store2 = EvidenceStore()
 store2.add(Evidence(type="suricata_signature_match", source="suricata", timestamp=time.time(),
-                     device="dev_weak", value=1.0, confidence=0.45, independence_group="suricata"))
+                     device="dev_weak", value=1.0, confidence=0.45))
 decision_low_sev = de.evaluate(store2.get_for_device("dev_weak"), ReputationVector(domain="", tier=3))
 check("REGRESSION GUARD: a severity=3/confidence=0.45 Suricata match does NOT hard-stop on its "
       "own -- only genuinely high-severity matches bypass normal corroboration",
@@ -333,10 +333,11 @@ check("REGRESSION GUARD: a severity=3/confidence=0.45 Suricata match does NOT ha
 # ═══════════════════════════════════════════════════════════════════════════════════
 # Section G: evidence family registration
 # ═══════════════════════════════════════════════════════════════════════════════════
-check("'suricata' is registered in EVIDENCE_FAMILIES",
-      "suricata" in EVIDENCE_FAMILIES)
-check("'suricata' counts toward independent attack evidence sources (in ATTACK_EVIDENCE_FAMILIES)",
-      "suricata" in ATTACK_EVIDENCE_FAMILIES)
+from argus.hypotheses.independence import INDEPENDENCE_FAMILY_MAP, NON_ATTACK_FAMILIES  # noqa: E402
+check("suricata_signature_match is registered (family signature_match)",
+      INDEPENDENCE_FAMILY_MAP.get("suricata_signature_match") == "signature_match")
+check("signature_match counts toward independent attack evidence sources (not a NON_ATTACK family)",
+      "signature_match" not in NON_ATTACK_FAMILIES)
 
 
 print()

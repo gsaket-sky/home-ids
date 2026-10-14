@@ -27,6 +27,7 @@ from core.state_guard import StateManager  # noqa: E402
 import mitigation.ips as ips_module  # noqa: E402
 from mitigation import l2_raw  # noqa: E402
 from mitigation.ips import IPSMitigator  # noqa: E402
+from mitigation.containment_gate import MONITOR_ONLY, ContainmentAuthorization  # noqa: E402
 from middleware.routers import mitigation_api  # noqa: E402
 
 V6 = "fe80::1c2d:3e4f:5a6b:7c8d"
@@ -121,8 +122,7 @@ def test_mitigate_autonomous_tarpit_stores_the_hint_from_known_ips(mitigator, no
     mitigator.config["simulation_mode"] = True
     st = SimpleNamespace(client_ip=V6, hostname="host1", device_id="dev1", mac_address=MAC,
                          known_ips=BoundedSet(max_size=8, initial=[V6, "10.0.0.21"]))
-    mitigator.mitigate(st, target_domain="unknown", risk_score=9.5, lateral_threat=False, is_safe=False,
-                       decision_state="HIGH")
+    mitigator.mitigate(st, target_domain="unknown", risk_score=9.5, authorization=ContainmentAuthorization("corroborated"), is_safe=False)
     assert mitigator._tarpit_active_targets["dev:dev1"]["arp_ips"] == {MAC: "10.0.0.21"}
 
 
@@ -141,7 +141,7 @@ def test_safe_device_auto_release_finds_the_device(mitigator, no_neighbours):
     mitigator.operator_tarpit("dev1", V6, MAC, "host1", ipv4_candidates=["10.0.0.21"])
     st = SimpleNamespace(client_ip=V6, hostname="host1", device_id="dev1", mac_address=MAC)
     assert "dev:dev1" in mitigator._tarpit_active_targets
-    mitigator.mitigate(st, target_domain="unknown", risk_score=0.0, lateral_threat=False, is_safe=True)
+    mitigator.mitigate(st, target_domain="unknown", risk_score=0.0, authorization=MONITOR_ONLY, is_safe=True)
     assert mitigator._tarpit_active_targets == {}                    # released, not left behind under another key
 
 

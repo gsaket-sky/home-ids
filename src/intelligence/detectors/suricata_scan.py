@@ -287,7 +287,6 @@ def suricata_alerts_to_evidence(alerts: List[dict], ip_to_device: Dict[str, str]
             device=device_id,
             value=1.0,
             confidence=confidence,
-            independence_group="suricata",
             provenance=f"detector:suricata:{signature_id}:{category}:{signature}",
             domain=target_ip or None,
         )

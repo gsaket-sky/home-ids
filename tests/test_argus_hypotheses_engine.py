@@ -584,7 +584,7 @@ check("a tier-4 rep_vector that DOES describe this hypothesis's own destination 
       dnst_matched == 4.0, f"got score={dnst_matched}")
 
 # PeerDeviationHypothesis's own evidence is device-level by design (destination_id=
-# NO_DESTINATION, live_engine.py's _inject_peer_deviation_evidence()) -- confirms the
+# NO_DESTINATION, live_engine.py's _gather_peer_stats()) -- confirms the
 # generalized fix is a correct NO-OP here, not an accidental behavior change to the
 # one hypothesis that deliberately has no destination to compare against.
 pd_hits = [ev_at("peer_deviation", 0.9, NO_DESTINATION), ev_at("zeek_conn_abuse", 1.0, NO_DESTINATION)]

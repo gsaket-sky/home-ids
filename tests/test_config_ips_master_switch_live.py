@@ -71,6 +71,7 @@ def test_reverting_through_the_api_restores_too(live):
 def test_each_mechanism_checks_the_master_switch_where_it_acts(tmp_path):
     from core.state_guard import StateManager
     from mitigation.ips import IPSMitigator
+    from mitigation.containment_gate import ContainmentAuthorization
     sm = StateManager(state_path=str(tmp_path / "ids_state.json"))
     # a config whose mechanism keys were left on although the master switch is off (e.g. a caller's own dict)
     m = IPSMitigator(config={"ips_enabled": False, "ips_router_enabled": True, "ips_tarpit_enabled": True,
@@ -79,8 +80,7 @@ def test_each_mechanism_checks_the_master_switch_where_it_acts(tmp_path):
     m._isolate_device_router = lambda **kw: pytest.fail("router isolation while ips_enabled is false")
     st = SimpleNamespace(client_ip="10.0.0.5", hostname="h", device_id="d1", mac_address="aa:bb:cc:00:00:01",
                          device_type="unknown", known_ips=[])
-    m.mitigate(st, target_domain="bad.example", risk_score=9.9, lateral_threat=True, is_safe=False,
-               decision_state="CRITICAL")
+    m.mitigate(st, target_domain="bad.example", risk_score=9.9, authorization=ContainmentAuthorization("corroborated"), is_safe=False)
     assert m._tarpit_active_targets == {} and m._router_isolated_devices == {}
 
 

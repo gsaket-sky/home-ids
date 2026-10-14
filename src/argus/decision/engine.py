@@ -128,6 +128,10 @@ class HardStopRule:
     # decision was supposed to remove. Set explicitly for both rules rather than
     # relying on geofence's exclusion being global-by-coincidence.
     own_families: FrozenSet[str] = field(default_factory=frozenset)
+    # U1 (2026-10-14): set on the rules the owner named as conclusive on one signal (honeypot contact, ARP spoofing);
+    # the decision carries it as "single_signal_basis", which mitigation/containment_gate.py reads. Never set on a
+    # rule that requires corroboration.
+    single_signal_basis: Optional[str] = None
 
 
 # Honeypot reads features["zeek_honeypot_hits"] directly (matches the earlier engine's
@@ -143,6 +147,7 @@ DEFAULT_HARD_STOP_REGISTRY: List[HardStopRule] = [
         explanation="Internal Honeypot Accessed",
         confidence=1.0,
         decision_path="hard_stop",
+        single_signal_basis="honeypot",
         check=lambda ev_store, features, is_safe, now: (
             bool(features) and _safe_float((features or {}).get("zeek_honeypot_hits", 0)) > 0
             and not is_safe
@@ -153,6 +158,7 @@ DEFAULT_HARD_STOP_REGISTRY: List[HardStopRule] = [
         explanation="Layer-2 ARP Spoofing Detected",
         confidence=1.0,
         decision_path="hard_stop",
+        single_signal_basis="arp_spoof",
         check=lambda ev_store, features, is_safe, now: _fresh_evidence_exists(
             ev_store, "arp_spoofing", now, _HARD_STOP_FRESHNESS_SECONDS),
     ),
@@ -373,6 +379,8 @@ class DecisionEngine:
         explanation = hyp_results["benign"]["name"]
         threat_confidence = 0.0
         decision_path = "benign"
+        # U1: which owner-named single-signal exception (if any) this verdict rests on -- see HardStopRule
+        single_signal_basis: Optional[str] = None
 
         # --- pluggable hard-stop registry (replaces the earlier engine's 4 hardcoded elifs) ---
         hard_stop_fired = None
@@ -417,6 +425,7 @@ class DecisionEngine:
                 explanation = rule.explanation
                 threat_confidence = rule.confidence
                 decision_path = rule.decision_path
+                single_signal_basis = rule.single_signal_basis
 
         elif rep.tier == 5:
             if getattr(rep, "verified_ioc", False):
@@ -425,6 +434,7 @@ class DecisionEngine:
                 explanation = "Confirmed Malicious IOC"
                 threat_confidence = 0.99
                 decision_path = "tier5_confirmed"
+                single_signal_basis = "verified_feed_ioc"   # owner exception: a curated feed naming the destination
             # TIGHTENED (third-party architecture review, 2026-09-09): was
             # `>= 1` -- rep.tier==5 here (not verified_ioc) can be reached by a
             # bare crowd-sourced AbuseIPDB score (>=4.0) alone, not a curated
@@ -484,7 +494,7 @@ class DecisionEngine:
         # signature fired on -- but that switch can only see pipeline.py's OWN detector
         # Evidence store, never the argus-only synthetic evidence
         # (coordinated_targeting/peer_deviation, live_engine.py's
-        # _inject_graph_derived_evidence()/_inject_peer_deviation_evidence()) that
+        # _gather_graph_derived()/_gather_peer_stats()) that
         # only ever existed inside THIS evaluate() call's evidence_list. Confirmed
         # live: COORDINATED_TARGETING/PEER_COHORT_DEVIATION alerts (the two highest-
         # volume signatures, ~57% of unsuppressed HIGH alerts in a 7h sample)
@@ -593,6 +603,7 @@ class DecisionEngine:
             "hypothesis_weight": hypothesis_weight,
             "reasoning_trail": trail,
             "decision_path": decision_path,
+            "single_signal_basis": single_signal_basis,
             "winning_evidence": winning_evidence,
             "evidence_families": evidence_families,
             "evidence_types": evidence_types,

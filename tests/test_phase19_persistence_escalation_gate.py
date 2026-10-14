@@ -52,9 +52,15 @@ check("the mitigate() call site downgrades containment_decision_state back to SU
           pipeline_src
       ) is not None)
 
-check("mitigate() itself is called with containment_decision_state, not decision.get(...) directly "
-      "(guards against the fix being reverted by re-inlining the old expression)",
-      re.search(r'decision_state=containment_decision_state', pipeline_src) is not None)
+# U1 (2026-10-14): mitigate() no longer takes a state; it takes the containment gate's authorisation, and the gate
+# refuses a persistence-escalated decision itself (mitigation/containment_gate.py, tests/test_containment_gate.py).
+check("mitigate() is called with the containment gate's authorisation for this decision "
+      "(guards against re-inlining a raw decision state)",
+      re.search(r'containment_auth\s*=\s*authorize_containment\(decision\)', pipeline_src) is not None
+      and re.search(r'authorization=containment_auth', pipeline_src) is not None)
+from mitigation.containment_gate import authorize_containment as _authorize  # noqa: E402
+check("the gate refuses a persistence-escalated HIGH, however many sources it names",
+      not _authorize({"state": "HIGH", "independent_sources": 3, "escalated_via_persistence": True}).authorized)
 
 
 def compute_containment_decision_state(decision: dict) -> str:

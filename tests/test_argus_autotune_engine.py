@@ -90,9 +90,12 @@ check("propose_change: a change to the value already in effect is refused with '
 # =============================================================================
 # Bounded-step clamping
 # =============================================================================
-bounds = TUNABLE_PARAMETERS["reputation_tier_suspicious_floor"]
+# The mechanics below (clamp, cooldown, canary, promote, rollback) use peer_deviation_multiplier: its step from the
+# bounds midpoint is golden-safe. reputation_tier_suspicious_floor's midpoint step (3.0 -> 3.5) hides a feed score of
+# 3.5 and is refused by the golden guard since 2026-10-14 (tests/test_argus_autotune_golden_gate.py).
+bounds = TUNABLE_PARAMETERS["peer_deviation_multiplier"]
 huge_jump = bounds["min"] + bounds["max_step"] * 10  # way past the per-change step limit
-r_clamped = engine.propose_change("reputation_tier_suspicious_floor", huge_jump, "test",
+r_clamped = engine.propose_change("peer_deviation_multiplier", huge_jump, "test",
                                      backtest_run_id="bt_pass_1", now=NOW)
 check("propose_change: an oversized requested change is accepted but CLAMPED "
       "to the allowlist's max_step, never applied as a one-shot jump",
@@ -162,13 +165,13 @@ if r_default_consistency.accepted:
 # =============================================================================
 # Cooldown between proposals for the same parameter
 # =============================================================================
-r_cooldown = engine.propose_change("reputation_tier_suspicious_floor", bounds["min"] + 0.1, "second try, too soon",
+r_cooldown = engine.propose_change("peer_deviation_multiplier", bounds["min"] + 0.1, "second try, too soon",
                                       backtest_run_id="bt_pass_1", now=NOW + 10)
 check("propose_change: a second proposal for the SAME parameter+device too "
       "soon after the first is rejected by the cooldown",
       r_cooldown.accepted is False and "cooldown" in r_cooldown.reason)
 
-r_after_cooldown = engine.propose_change("reputation_tier_suspicious_floor", bounds["min"] + 0.1, "after cooldown",
+r_after_cooldown = engine.propose_change("peer_deviation_multiplier", bounds["min"] + 0.1, "after cooldown",
                                              backtest_run_id="bt_pass_1", now=NOW + 4000)
 check("propose_change: the SAME parameter can be proposed again once the "
       "cooldown has elapsed", r_after_cooldown.accepted is True)
@@ -177,7 +180,7 @@ check("propose_change: the SAME parameter can be proposed again once the "
 # Promote requires BOTH canary elapsed AND a confirming backtest
 # =============================================================================
 check("get_active_value: an UNPROMOTED proposal has no effect yet",
-      engine.get_active_value("reputation_tier_suspicious_floor") is None)
+      engine.get_active_value("peer_deviation_multiplier") is None)
 
 promoted_too_early = engine.promote_change(r_clamped.change_id, "bt_pass_1", now=NOW + 100)
 check("promote_change: refuses promotion before the canary window has elapsed",
@@ -199,8 +202,8 @@ check("promote_change: succeeds once BOTH the canary window elapsed AND a "
 _default_old_value = (bounds["min"] + bounds["max"]) / 2.0
 _expected_promoted = _default_old_value + bounds["max_step"]
 check("get_active_value: reflects the promoted, step-clamped value immediately",
-      abs(engine.get_active_value("reputation_tier_suspicious_floor") - _expected_promoted) < 1e-9,
-      f"got {engine.get_active_value('reputation_tier_suspicious_floor')}, expected {_expected_promoted}")
+      abs(engine.get_active_value("peer_deviation_multiplier") - _expected_promoted) < 1e-9,
+      f"got {engine.get_active_value('peer_deviation_multiplier')}, expected {_expected_promoted}")
 
 # =============================================================================
 # Rollback -- immediate effect, idempotent
@@ -209,7 +212,7 @@ rolled_back = engine.rollback_change(r_clamped.change_id, "operator says this wa
 check("rollback_change: succeeds on a promoted change", rolled_back is True)
 check("get_active_value: a rolled-back change no longer counts, immediately -- "
       "not just in the audit trail",
-      engine.get_active_value("reputation_tier_suspicious_floor") is None)
+      engine.get_active_value("peer_deviation_multiplier") is None)
 
 rolled_back_again = engine.rollback_change(r_clamped.change_id, "trying again", now=NOW + 9 * 3600)
 check("rollback_change: rolling back an already-rolled-back change is an "

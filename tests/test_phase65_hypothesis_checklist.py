@@ -47,9 +47,9 @@ hyp = HypothesisEngine()
 # ═══════════════════════════════════════════════════════════════════════════════════
 dga_ev = [
     Evidence(type="dns_dga_burst", source="threat_signals", timestamp=time.time(), device="dev_a",
-             value=20.0, confidence=0.9, independence_group="dns_behavior"),
+             value=20.0, confidence=0.9),
     Evidence(type="dns_rate", source="pihole", timestamp=time.time(), device="dev_a",
-             value=150.0, confidence=0.9, independence_group="dns_behavior"),
+             value=150.0, confidence=0.9),
 ]
 result_a = hyp.evaluate_all(dga_ev, ReputationVector(domain="", tier=3))
 checklist_a = result_a["attack"]["checklist"]

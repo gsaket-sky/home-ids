@@ -22,7 +22,6 @@ class DNSBehaviorDetector:
                 device=device,
                 value=rate,
                 confidence=min(1.0, rate / 500.0), # Caps at 500 qps for 1.0 confidence
-                independence_group="dns_behavior",
                 provenance="detector:dns_behavior:rate",
                 # P2 FIX (third-party review, 2026-09-28): domain=... attaches the
                 # real domain actually driving this rate burst (dns_features.py's
@@ -51,7 +50,6 @@ class DNSBehaviorDetector:
                 device=device,
                 value=entropy,
                 confidence=min(1.0, (entropy - 4.0) / 1.5),
-                independence_group="dns_behavior",
                 provenance="detector:dns_behavior:entropy",
                 domain=features.get("top_entropy_domain") or None,
             ))
@@ -66,7 +64,6 @@ class DNSBehaviorDetector:
                 device=device,
                 value=unique_ratio,
                 confidence=unique_ratio,
-                independence_group="dns_behavior",
                 provenance="detector:dns_behavior:unique_ratio",
                 # W-04: the parent domain the ratio was measured under (dns_features._unique_subdomain_ratio).
                 domain=features.get("unique_subdomain_ratio_domain") or None,

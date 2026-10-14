@@ -1,0 +1,40 @@
+{
+ "source": {
+  "framework": "NIST Special Publications (behaviour lists derived for this product; not machine-readable at the source)",
+  "documents": {
+   "800-94": "SP 800-94, Guide to Intrusion Detection and Prevention Systems (IDPS)",
+   "800-61": "SP 800-61, Computer Security Incident Handling Guide",
+   "800-92": "SP 800-92, Guide to Computer Security Log Management"
+  }
+ },
+ "rule": "every behaviour below is referenced by >= 1 scenario (active or pending); every NIST reference in a scenario is listed here",
+ "behaviours": [
+  {"id": "800-94:beacon", "title": "Detect periodic command-and-control check-ins (network-based IDPS, anomaly detection)"},
+  {"id": "800-94:campaign", "title": "Correlate the same indicator across several hosts"},
+  {"id": "800-94:dns-anomaly", "title": "Detect anomalous DNS use (generated names, tunnelling, rewritten answers)"},
+  {"id": "800-94:exfil", "title": "Detect unusual outbound data transfer"},
+  {"id": "800-94:low-and-slow", "title": "Detect activity spread over long periods below per-interval thresholds (evasion by timing)"},
+  {"id": "800-94:lateral", "title": "Detect internal reconnaissance and lateral movement"},
+  {"id": "800-94:scan", "title": "Detect scanning and brute-force fan-out"},
+  {"id": "800-94:signature", "title": "Signature-based detection, with its false-positive limits"},
+  {"id": "800-94:policy", "title": "Policy-based detection (e.g. disallowed destinations)"},
+  {"id": "800-94:inbound", "title": "Detect exposed services and inbound-initiated sessions"},
+  {"id": "800-94:l2-attack", "title": "Detect link-layer and name-service attacks (ARP, DHCP, RA, LLMNR/NBNS)"},
+  {"id": "800-94:dos", "title": "Detect denial-of-service participation"},
+  {"id": "800-94:impact", "title": "Detect destructive activity on file shares"},
+  {"id": "800-94:resource-abuse", "title": "Detect resource hijacking (mining, proxyware)"},
+  {"id": "800-94:evasion", "title": "Resist evasion: encryption, tunnelling, trusted services, rotation, mimicry"},
+  {"id": "800-94:tuning", "title": "Tuning: benign activity must not alert (false-positive control)"},
+  {"id": "800-94:benign-mass-event", "title": "Benign events that affect many hosts at once must not page"},
+  {"id": "800-94:sensor-overload", "title": "Sensor overload and packet loss are recorded, not treated as clean"},
+  {"id": "800-94:self-protection", "title": "The IDPS monitors and protects itself"},
+  {"id": "800-61:detection", "title": "Detection and analysis: precursors and indicators from the first observation"},
+  {"id": "800-61:analysis-related-evidence", "title": "Analysis: an incident rests on related evidence, not unrelated coincidences"},
+  {"id": "800-61:containment", "title": "Containment: holds, honours approvals, does not loop"},
+  {"id": "800-61:recovery", "title": "Recovery: return after offline / restart resumes the incident correctly"},
+  {"id": "800-61:lessons", "title": "Post-incident activity: outcomes feed learning, wrong learning is revoked"},
+  {"id": "800-92:clock-integrity", "title": "Log time integrity: clock jumps are detected and handled"},
+  {"id": "800-92:late-logs", "title": "Late, out-of-order or duplicated log records are ordered by event time"},
+  {"id": "800-92:missing-span", "title": "Missing log spans are recorded as gaps, never as 'nothing happened'"}
+ ]
+}

@@ -409,7 +409,6 @@ def audit_device(device_id: str, audit: DeviceBurstAudit, geoip_engine=None,
         device=device_id,
         value=float(len(unexplained)),
         confidence=confidence,
-        independence_group="blindspot_audit",
         provenance=f"detector:dns_evasion:{gap_subtag}:{note}",
         domain=representative_ip,
     )]

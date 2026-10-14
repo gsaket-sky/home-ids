@@ -159,6 +159,9 @@ class DeviceState:
         
         self.rolling = RollingWindow()
         self.seen_domains = BoundedSet(max_size=10000)
+        # First sighting time per rolling-window domain not yet learned into seen_domains (U4). In memory only: a restart
+        # restarts the wait, which delays learning and never brings it forward.
+        self.domain_first_seen = {}
         self.geo_exported_ips = BoundedSet(max_size=5000)
         
         self.last_baseline_update = 0.0

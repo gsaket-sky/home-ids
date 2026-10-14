@@ -171,11 +171,15 @@ def _has_statements(*lines: str) -> bool:
     _dest_ip_is_real_host guard was added, which is not a behavior change."""
     return " ".join(lines) in _pipeline_src_flat
 
-check("THE FIX: lateral_threat (which authorizes Layer-2 tarpit, bypassing the normal "
-      "risk>=9.0 floor) now requires zeek_lateral_unique_targets to clear the "
-      "configured threshold, not just zeek_lateral_moves > 0",
-      "lateral_targets_count = int(features.get(\"zeek_lateral_unique_targets\", 0) or 0)" in pipeline_src and
-      "lateral_threshold = int(self.config.get(\"lateral_movement_unique_targets_threshold\", 2))" in pipeline_src)
+# U1 (2026-10-14) went further than this fix: no lateral-movement window count authorises containment at all any
+# more (it fed `lateral_threat`, which bypassed the risk floor, the release cooldown and every approval). Lateral
+# movement feeds the decision; only the decision authorises (mitigation/containment_gate.py).
+import inspect  # noqa: E402
+from mitigation.ips import IPSMitigator as _IPS  # noqa: E402
+check("THE FIX, superseded by U1: no lateral-movement count authorises containment -- pipeline.py no longer computes "
+      "lateral_threat and mitigate() has no such parameter",
+      "lateral_threat = (" not in pipeline_src
+      and "lateral_threat" not in inspect.signature(_IPS.mitigate).parameters)
 check("REGRESSION GUARD: honeypot hits still independently authorize lateral_threat "
       "regardless of target count -- the fix is scoped to the lateral-movement signal "
       "specifically, not honeypot access",
@@ -268,7 +272,7 @@ check("REGRESSION GUARD: ordinary local HTTP traffic with no discovery-protocol 
 hyp = LocalDeviceDiscoveryHypothesis()
 neutral_rep = ReputationVector(domain="", tier=3)
 discovery_evidence = [Evidence(type="local_device_discovery", source="zeek", timestamp=time.time(),
-                                device="dev1", value=3.0, confidence=0.7, independence_group="local_context")]
+                                device="dev1", value=3.0, confidence=0.7)]
 score_discovery = hyp.evaluate(discovery_evidence, neutral_rep)
 check("LocalDeviceDiscoveryHypothesis scores nonzero when discovery evidence is present",
       score_discovery > 0.0, f"got {score_discovery}")
@@ -284,7 +288,7 @@ check("THE CORE FIX: LocalDeviceDiscoveryHypothesis is registered in HypothesisE
 engine = HypothesisEngine()
 weak_attack_and_discovery = discovery_evidence + [
     Evidence(type="zeek_conn_abuse", source="zeek", timestamp=time.time(), device="dev1",
-              value=5.0, confidence=0.5, independence_group="zeek_network"),
+              value=5.0, confidence=0.5),
 ]
 result = engine.evaluate_all(weak_attack_and_discovery, neutral_rep)
 check("end-to-end: HypothesisEngine.evaluate_all() reports a real benign score "
@@ -457,7 +461,7 @@ check("BUGFIX (explicit user request, 2026-09-09): the WHY line also shows the "
 # 4-segment provenance, no tier subtag at all) must not show a fabricated tier.
 old_format_ev = Evidence(
     type="zeek_notice", source="zeek", timestamp=time.time(), device="dev1",
-    value=1.0, confidence=0.75, independence_group="zeek_network",
+    value=1.0, confidence=0.75,
     provenance="detector:zeek:notice:SSL::Invalid_Server_Cert",
 )
 old_format_description = _describe_evidence_real(old_format_ev)
@@ -525,14 +529,14 @@ check("REGRESSION GUARD: omitting geoip_engine entirely (every existing call sit
 from core.pipeline import _EVIDENCE_FAMILY_LABELS
 synth_notice_ev = Evidence(
     type="zeek_notice_medium", source="v13_live_engine", timestamp=time.time(), device="dev1",
-    value=1.0, confidence=0.65, independence_group="network_behavior",
+    value=1.0, confidence=0.65,
     provenance="detector:zeek:notice:SSL::Invalid_Server_Cert",
 )
 check("REGRESSION GUARD: a zeek_notice_medium item synthesized via the attack_evidence "
       "bridge (v13's own 'network_behavior' family name, not v1's 'zeek_network') still "
       "resolves to the correct 'Network (Zeek)' display label",
-      _EVIDENCE_FAMILY_LABELS.get(synth_notice_ev.independence_group) == "Network (Zeek)",
-      f"got {_EVIDENCE_FAMILY_LABELS.get(synth_notice_ev.independence_group)!r}")
+      _EVIDENCE_FAMILY_LABELS.get(synth_notice_ev.family) == "Network (Zeek)",
+      f"got {_EVIDENCE_FAMILY_LABELS.get(synth_notice_ev.family)!r}")
 check("REGRESSION GUARD: that same synthesized zeek_notice_medium item, now that "
       "provenance is propagated through the bridge, still surfaces the real note "
       "type AND its tier in the WHY line -- not the generic fallback",
