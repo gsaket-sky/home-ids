@@ -41,18 +41,18 @@ from argus.graph.store import GraphStore
 # ═══════════════════════════════════════════════════════════════════════════════════
 with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
     intel = LocalConfirmedIntel(tmpdir, ttl_seconds=3600.0)  # instance default: 1 hour
-    intel.record("ip", "1.2.3.4", "devA", ttl_seconds=0.01)  # this entry: ~effectively already expired
+    intel.record("ip", "1.2.3.4", "devA", ttl_seconds=0.01, source="feed")  # this entry: ~effectively already expired
     time.sleep(0.05)
     check("THE FIX: a per-entry ttl_seconds override is respected by check() -- this "
           "entry's own short TTL expired even though the instance default (1h) hasn't",
           intel.check("ip", "1.2.3.4") is None)
 
-    intel.record("ip", "5.6.7.8", "devB")  # no override -- uses instance default (1h, not expired)
+    intel.record("ip", "5.6.7.8", "devB", source="feed")  # no override -- uses instance default (1h, not expired)
     check("REGRESSION GUARD: an entry with no ttl_seconds override still uses the "
           "instance-wide default and is NOT expired",
           intel.check("ip", "5.6.7.8") is not None)
 
-    intel.record("domain", "evil.example.com", "devC", ttl_seconds=7200.0)
+    intel.record("domain", "evil.example.com", "devC", ttl_seconds=7200.0, source="feed")
     entry = intel.check("domain", "evil.example.com")
     check("a real per-entry ttl_seconds is stored on the entry itself",
           entry is not None and entry.get("ttl_seconds") == 7200.0, f"got {entry}")
@@ -76,7 +76,7 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
     # check (which only runs `if asn_owner`) can't fire regardless of who really owns it.
     fp.record_confirmed_threat(
         "dev_x", "confirmed-malicious-domain.example", "45.33.32.156",
-        reason="TEST", ttl_seconds=999.0,
+        reason="TEST", ttl_seconds=999.0, source="operator", asn_owner="Example Hosting Ltd",
     )
     domain_entry = fp.local_intel.check("domain", "confirmed-malicious-domain.example")
     ip_entry = fp.local_intel.check("ip", "45.33.32.156")
@@ -85,7 +85,7 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
     check("record_confirmed_threat() threads ttl_seconds through to the IP branch",
           ip_entry is not None and ip_entry.get("ttl_seconds") == 999.0, f"got {ip_entry}")
 
-    fp.record_confirmed_threat("dev_y", "another-domain.example", "45.33.32.157", reason="TEST")
+    fp.record_confirmed_threat("dev_y", "another-domain.example", "45.33.32.157", reason="TEST", source="operator", asn_owner="Example Hosting Ltd")
     default_entry = fp.local_intel.check("domain", "another-domain.example")
     check("REGRESSION GUARD: omitting ttl_seconds (every existing caller, e.g. "
           "the engine's own Stage-1 hard-stop path) still works exactly as "

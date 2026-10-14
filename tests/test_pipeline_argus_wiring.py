@@ -41,10 +41,16 @@ check("the pipeline's CL-AFPE is the engine singleton", p.cl_afpe is engine)
 check("CL-AFPE uses the pipeline's confirmed-intel store", engine.local_intel is p.local_intel)
 check("CL-AFPE uses the pipeline's familiarity store", engine.familiarity is p.familiarity)
 check("threat intel's trust-cache allowlist reads CL-AFPE", getattr(p.ti_engine, "trust_cache_provider", engine) is engine)
-check("retired argus store merged into the shared one", p.local_intel.check("ip", "198.51.100.7") is not None)
+check("retired argus store merged into the shared one",
+      p.local_intel.check("ip", "198.51.100.7", honored_only=False) is not None)
 check("retired store renamed", (state / "v13_cl_afpe" / "local_confirmed_intel.json.merged").exists())
+# 2026-10-14 (0c Step 3): the HIGH/CRITICAL bar is the engine's own judgement -- it counts, it adds nothing
 engine.record_confirmed_threat("devX", "pipeline-feed.test", "", reason="HIGH_CRITICAL_DECISION", signature="X")
-check("HIGH/CRITICAL feed is visible to the CL-AFPE Stage-1 check", engine.local_intel.check("domain", "pipeline-feed.test") is not None)
+check("HIGH/CRITICAL adds nothing to the confirmed-intel store",
+      engine.local_intel.check("domain", "pipeline-feed.test", honored_only=False) is None)
+engine.record_confirmed_threat("devX", "pipeline-feed.test", "", reason="OPERATOR", signature="X", source="operator")
+check("a person's confirmation is visible to the CL-AFPE Stage-1 check",
+      engine.local_intel.check("domain", "pipeline-feed.test") is not None)
 check("sigma shift comes from CL-AFPE", live.get_device_sigma_shift("nobody") == 0.0)
 check("_device_threshold default path", p._device_threshold("nobody", "conn_abuse_unique_ip_threshold", 5.0) == 5.0)
 check("no earlier-engine attributes remain", not hasattr(p, "fp_engine") and not hasattr(p, "decision_engine"))

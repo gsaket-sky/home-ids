@@ -65,7 +65,7 @@ def _alert(device_id="pipeline_dev", signature="NETWORK_INTRUSION", domain="", d
 engine = live_engine._get_cl_afpe_engine()
 check("C: the engine uses the injected LocalConfirmedIntel instance (one store, not a private copy)",
       engine.local_intel is shared)
-shared.record("domain", "evil-example.test", "dev_a", reason="test")
+shared.record("domain", "evil-example.test", "dev_a", reason="test", source="feed")
 check("C: an indicator recorded through the shared store is visible to the engine's own check",
       engine.local_intel.check("domain", "evil-example.test") is not None)
 
@@ -76,7 +76,7 @@ old_dir.mkdir(parents=True)
                            "sources": ["dev_b"], "reason": "shadow-era", "ttl_seconds": 86400.0}},
     "domain": {}}), encoding="utf-8")
 merged = live_engine.merge_retired_local_intel(shared, state_dir)
-check("C: the retired shadow-era store is merged into the shared one", merged == 1 and shared.check("ip", "203.0.113.9"))
+check("C: the retired shadow-era store is merged into the shared one", merged == 1 and shared.check("ip", "203.0.113.9", honored_only=False))
 check("C: the retired file is renamed so it is merged only once",
       not (old_dir / "local_confirmed_intel.json").exists() and (old_dir / "local_confirmed_intel.json.merged").exists())
 check("C: a second merge is a no-op", live_engine.merge_retired_local_intel(shared, state_dir) == 0)
@@ -84,10 +84,10 @@ check("C: a second merge is a no-op", live_engine.merge_retired_local_intel(shar
 # --- E. across processes: re-read on change, atomic saves ---
 other_process = LocalConfirmedIntel(str(state_dir))      # e.g. the scheduler's retro-hunt
 time.sleep(0.02)
-other_process.record("domain", "found-by-retro-hunt.test", "dev_c", reason="retro")
+other_process.record("domain", "found-by-retro-hunt.test", "dev_c", reason="retro", source="feed")
 check("E: a write by another process is seen by this one on its next check",
       shared.check("domain", "found-by-retro-hunt.test") is not None)
-shared.record("domain", "second.test", "dev_a")
+shared.record("domain", "second.test", "dev_a", source="feed")
 data = json.loads((state_dir / "local_confirmed_intel.json").read_text(encoding="utf-8"))
 check("E: this process's next save keeps the other process's entry (no lost update)",
       "found-by-retro-hunt.test" in data["domain"] and "second.test" in data["domain"])
@@ -119,7 +119,7 @@ check("G: familiarity survives a restart (saved atomically to state/device_famil
       DeviceFamiliarity(str(state_dir)).get_baseline_familiarity("pipeline_dev", domain_base="vendor.example") == 1.0)
 
 # --- H. confirmed-threat counts and training records ---
-engine.record_confirmed_threat("pipeline_dev", "bad-c2.example", "", reason="test", signature="CONNECTION_ABUSE")
+engine.record_confirmed_threat("pipeline_dev", "bad-c2.example", "", reason="test", signature="CONNECTION_ABUSE", source="operator", asn_owner="Example Hosting Ltd")
 check("H: a confirmed threat is counted per device, overall and per signature",
       engine.get_confirmed_count("pipeline_dev") >= 1
       and engine.get_confirmed_count("pipeline_dev", signature="CONNECTION_ABUSE") == 1)
@@ -195,7 +195,7 @@ _k_intel = LocalConfirmedIntel(str(_k_dir))
 _k_eng = _K_Engine(_store, local_intel=_k_intel)
 _store.upsert_device("k_dev_a", timestamp=NOW)
 _store.upsert_device("k_dev_b", timestamp=NOW)
-_k_eng.record_confirmed_threat("k_dev_a", None, "45.155.205.77", reason="TEST_CONFIRMED", asn_owner="Example Hosting")
+_k_eng.record_confirmed_threat("k_dev_a", None, "45.155.205.77", reason="TEST_CONFIRMED", asn_owner="Example Hosting", source="operator")
 _k_before = dict(_k_intel.check("ip", "45.155.205.77"))
 time.sleep(0.05)
 _k_v = _k_eng.evaluate(_alert(device_id="k_dev_b", dest_ip="45.155.205.77"), features={}, now=NOW + 5)
@@ -209,9 +209,11 @@ check("K: ...but that memory-only hard stop does NOT renew the entry (no self-pe
       f"before={_k_before} after={_k_after}")
 _k_v2 = _k_eng.evaluate(_alert(device_id="k_dev_b", dest_ip="45.155.205.77", features={"zeek_honeypot_hits": 1}),
                         features={"zeek_honeypot_hits": 1}, now=NOW + 6)
-check("K: an independent hard stop (decoy contact) on the same destination does renew it",
-      _k_intel.check("ip", "45.155.205.77")["count"] == _k_before["count"] + 1, str(_k_intel.check("ip", "45.155.205.77")))
-_k_eng.record_confirmed_threat("k_dev_a", None, "103.86.96.100", reason="TEST_CONFIRMED")
+# 2026-10-14 (0c Step 3): a decoy-contact hard stop is the engine's own judgement -- it counts the confirmation but
+# never writes to the store (only a feed or a person adds or renews an entry).
+check("K: an independent behavioural hard stop (decoy contact) does not renew it either",
+      _k_intel.check("ip", "45.155.205.77")["count"] == _k_before["count"], str(_k_intel.check("ip", "45.155.205.77")))
+_k_eng.record_confirmed_threat("k_dev_a", None, "103.86.96.100", reason="TEST_CONFIRMED", source="operator", asn_owner="Example Hosting Ltd")
 check("K: a VPN provider's public resolver (NordVPN DNS) is never recorded as a confirmed threat",
       _k_intel.check("ip", "103.86.96.100") is None)
 _k_intel.record("ip", "103.86.99.100", "k_dev_a", reason="LEGACY_ENTRY")
@@ -224,13 +226,13 @@ check("K: the DNS-evasion audit's resolver list is unchanged (a VPN resolver sta
 # VPN tunnel endpoints (2026-10-06): no list can name them, so the port the device used decides.
 for _k_port in (51820, 1194, 500, 4500):
     _k_ip = f"45.155.206.{_k_port % 200}"
-    _k_eng.record_confirmed_threat("k_dev_a", None, _k_ip, reason="TEST_CONFIRMED", dest_port=_k_port)
+    _k_eng.record_confirmed_threat("k_dev_a", None, _k_ip, reason="TEST_CONFIRMED", dest_port=_k_port, source="operator", asn_owner="Example Hosting Ltd")
     check(f"K: an address reached on VPN tunnel port {_k_port} is never recorded as confirmed intel",
           _k_intel.check("ip", _k_ip) is None)
-_k_eng.record_confirmed_threat("k_dev_a", None, "45.155.206.77", reason="TEST_CONFIRMED", dest_port=4444)
+_k_eng.record_confirmed_threat("k_dev_a", None, "45.155.206.77", reason="TEST_CONFIRMED", dest_port=4444, source="operator", asn_owner="Example Hosting Ltd")
 check("K: the same kind of address on an ordinary port is still recorded (the guard is the port, not the address)",
       _k_intel.check("ip", "45.155.206.77") is not None)
-_k_eng.record_confirmed_threat("k_dev_a", "vpn-c2.example", "45.155.206.78", reason="TEST_CONFIRMED", dest_port=51820)
+_k_eng.record_confirmed_threat("k_dev_a", "vpn-c2.example", "45.155.206.78", reason="TEST_CONFIRMED", dest_port=51820, source="operator", asn_owner="Example Hosting Ltd")
 check("K: the tunnel guard drops only the address -- an evidence-linked domain is still recorded",
       _k_intel.check("ip", "45.155.206.78") is None and _k_intel.check("domain", "vpn-c2.example") is not None)
 _k_feats = {"zeek_honeypot_hits": 1, "last_dest_ip": "45.155.206.79", "last_dest_port": 51820}
@@ -241,8 +243,12 @@ check("K: a Stage-1 hard stop on a WireGuard endpoint (port from the device's la
 _k_feats2 = {"zeek_honeypot_hits": 1, "last_dest_ip": "45.155.206.200", "last_dest_port": 51820}
 _k_eng.evaluate(_alert(device_id="k_dev_b", dest_ip="45.155.206.80", features=_k_feats2), features=_k_feats2,
                 now=NOW + 8)
+# 2026-10-14: a behavioural hard stop writes nothing any more, so the port attribution is checked directly
+from argus.cl_afpe.engine import _dest_port_for as _K_port_for  # noqa: E402
 check("K: ...but a tunnel port seen for a DIFFERENT address does not protect this one",
-      _k_intel.check("ip", "45.155.206.80") is not None)
+      _K_port_for(_k_feats2, "45.155.206.80") is None and _K_port_for(_k_feats2, "45.155.206.200") == 51820)
+check("K: a behavioural hard stop (decoy contact) records nothing at all",
+      _k_intel.check("ip", "45.155.206.80", honored_only=False) is None)
 
 # --- D. an engine error never suppresses: the alert is published as UNCERTAIN ---
 

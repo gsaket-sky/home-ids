@@ -74,7 +74,7 @@ from argus.ops import live_retro_hunter  # noqa: E402
 
 intel = LocalConfirmedIntel(str(tmp / "intel"))
 VPN_IP = "187.40.40.147"
-intel.record("ip", VPN_IP, "phone", reason="STAGE_1_HARD_STOP")
+intel.record("ip", VPN_IP, "phone", reason="STAGE_1_HARD_STOP", source="feed")
 before = dict(intel.check("ip", VPN_IP))
 store.record_device_destinations("laptop", [VPN_IP], timestamp=NOW - 600)
 matches = hunter.check_local_intel_history(intel, days_back=7, now=NOW)

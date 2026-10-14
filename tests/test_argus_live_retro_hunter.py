@@ -154,7 +154,7 @@ li_store.close()
 
 _li_intel_dir = _li_dir   # the shared store lives in the state dir
 LocalConfirmedIntel(str(_li_intel_dir)).record(
-    "domain", "already-bad.example.com", "li_confirmer", reason="STAGE_1_HARD_STOP")
+    "domain", "already-bad.example.com", "li_confirmer", reason="STAGE_1_HARD_STOP", source="feed")
 
 live_retro_hunter.CONFIG = {"state_path": str(_li_dir / "ids_state.json"),
                               "telegram_token": "fake-token", "telegram_chat_id": "fake-chat"}

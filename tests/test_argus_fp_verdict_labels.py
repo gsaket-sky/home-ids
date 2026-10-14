@@ -62,7 +62,7 @@ def alert(device, domain, ip):
 
 tmp = tempfile.mkdtemp(prefix="fp_verdict_labels_")
 fp = ClAfpeEngine(GraphStore(str(Path(tmp) / "graph.db")), local_intel=LocalConfirmedIntel(tmp))
-fp.record_confirmed_threat("dev_a", "flagged-before.example", "198.51.100.7", reason="unit_test")
+fp.record_confirmed_threat("dev_a", "flagged-before.example", "198.51.100.7", reason="unit_test", source="operator", asn_owner="Example Hosting Ltd")
 
 v = fp.evaluate(alert("dev_b", "flagged-before.example", "198.51.100.7"), dict(SAFE))
 check("a hard stop from the local confirmed-intel match alone is PREVIOUSLY_FLAGGED",

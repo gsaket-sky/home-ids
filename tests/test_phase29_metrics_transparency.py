@@ -182,7 +182,7 @@ from core.pipeline import record_cl_afpe_verdict  # noqa: E402
 
 with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir3:
     fp = ClAfpeEngine(GraphStore(str(Path(tmpdir3) / "graph.db")), local_intel=LocalConfirmedIntel(tmpdir3))
-    fp.record_confirmed_threat("dev_metrics_test", "malicious-metrics-test.example", "6.6.6.6", reason="unit_test")
+    fp.record_confirmed_threat("dev_metrics_test", "malicious-metrics-test.example", "6.6.6.6", reason="unit_test", source="operator", asn_owner="Example Hosting Ltd")
     safe_features = {"ti_risk": 0.0, "zeek_lateral_moves": 0, "zeek_ja3_malicious": 0,
                      "zeek_ja4_malicious": 0, "zeek_honeypot_hits": 0, "abuseipdb_risk": 0.0,
                      "outbound_bytes_z": 0.0}

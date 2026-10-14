@@ -48,8 +48,9 @@ from argus.cl_afpe.ml_scoring import MLScorer, NEUTRAL_LGBM_SCORE, combine_score
 from argus.cl_afpe import composite_trust as ct
 from argus.cl_afpe.verdicts import CONFIRMED_THREAT, LIKELY_REAL, PREVIOUSLY_FLAGGED
 from argus.baseline.engine import derive_activity_state
-from intelligence.local_intel import LocalConfirmedIntel
+from intelligence.local_intel import HONORED_SOURCES, LocalConfirmedIntel
 from intelligence.device_familiarity import DeviceFamiliarity
+from intelligence.reputation import source_status as reputation_source_status
 from utils import (
     NOT_A_THREAT_INDICATOR_RESOLVERS, is_cloud_cdn_provider_org, is_telemetry_domain, is_vpn_tunnel_port,
     _is_cdn_or_cloud_domain, etld1_strict as etld1,  # trust decisions fail closed (see utils.etld1_strict)
@@ -309,6 +310,18 @@ class ClAfpeEngine:
             return pop.is_learning_only(domain) is True
         except Exception as e:
             LOGGER.debug("learning-adoption ledger unavailable for %s: %s", domain, e)
+            return False
+
+    def _domain_established(self, domain: str) -> bool:
+        """True when the popularity store calls `domain` established on this network (used by several devices on
+        many days). False without a popularity store or when it cannot be read."""
+        pop = self.popularity
+        if pop is None or not domain:
+            return False
+        try:
+            return bool(pop.is_established(domain))
+        except Exception as e:
+            LOGGER.debug("popularity unavailable for %s: %s", domain, e)
             return False
 
     def domain_young(self, domain: str) -> bool:
@@ -687,7 +700,8 @@ class ClAfpeEngine:
     def record_confirmed_threat(self, device_id: str, base_domain: Optional[str], dest_ip: Optional[str],
                                   reason: str, asn_owner: str = "",
                                   ttl_seconds: Optional[float] = None, signature: str = "",
-                                  dest_port: Optional[int] = None, source: str = "automatic") -> None:
+                                  dest_port: Optional[int] = None, source: str = "automatic",
+                                  feed_named: Optional[dict] = None) -> None:
         """Matches record_confirmed_threat() exactly (lines 967-1037): the write
         path into the shared LocalConfirmedIntel store, so a DIFFERENT device
         touching the same IOC later gets an immediate hard-stop via
@@ -698,27 +712,47 @@ class ClAfpeEngine:
         protected IP (see _is_ip_protected_from_confirmed_intel above) -- both real,
         live-incident-driven guards, not speculative. A no-op, not an error, when
         no LocalConfirmedIntel was ever injected (self.local_intel is None) --
-        never raises: a bookkeeping failure must not take down the confirmed-threat verdict."""
-        if self.local_intel is None:
-            return
-        try:
-            if base_domain and is_telemetry_domain(base_domain):
-                base_domain = None
-            if base_domain:
-                self.local_intel.record("domain", base_domain, device_id, reason=reason, ttl_seconds=ttl_seconds)
-            if dest_ip and dest_ip != "unknown" and self._is_ip_protected_from_confirmed_intel(dest_ip, asn_owner=asn_owner):
-                dest_ip = "unknown"
-            # `dest_port`: the port the device itself used for dest_ip, when known. A VPN tunnel endpoint
-            # (utils.VPN_TUNNEL_PORTS) is shared infrastructure: never recorded, whichever device used it.
-            if dest_ip and dest_ip != "unknown" and is_vpn_tunnel_port(dest_port):
-                LOGGER.info("Not recording %s as confirmed intel: reached on VPN tunnel port %s", dest_ip, dest_port)
-                dest_ip = "unknown"
-            if dest_ip and dest_ip != "unknown":
-                self.local_intel.record("ip", dest_ip, device_id, reason=reason, ttl_seconds=ttl_seconds)
-        except Exception:
-            # A bookkeeping failure here must never take down the confirmed-threat verdict.
-            LOGGER.exception("Failed to record confirmed intel (non-fatal)")
+        never raises: a bookkeeping failure must not take down the confirmed-threat verdict.
+
+        2026-10-14 (0c Step 3) -- who may add, and what: only a curated feed ("feed") or a person ("operator"); the
+        engine's own judgement ("automatic") only counts the confirmation. A feed adds exactly what it listed
+        (`feed_named` = the pipeline's features["ti_matched"]: the domains and the address the lists matched) -- never the alert's base domain or address on the strength of a match on something else; a feed
+        confirmation without that record adds nothing. An address needs a known network owner (ASN)."""
+        if self.local_intel is not None and source in HONORED_SOURCES:
+            try:
+                self._record_confirmed_intel(device_id, base_domain, dest_ip, reason, asn_owner, ttl_seconds,
+                                             dest_port, source, feed_named)
+            except Exception:
+                # A bookkeeping failure here must never take down the confirmed-threat verdict.
+                LOGGER.exception("Failed to record confirmed intel (non-fatal)")
         self._increment_confirmed_count(device_id, signature, source=source)
+
+    def _record_confirmed_intel(self, device_id, base_domain, dest_ip, reason, asn_owner, ttl_seconds, dest_port,
+                                source, feed_named) -> None:
+        if source == "feed":
+            named = feed_named if isinstance(feed_named, dict) else {}
+            # the listed names that belong to this alert's domain, exactly as listed
+            domains = [d for d in (named.get("domains") or [])
+                       if d and base_domain and (d == base_domain or etld1(d) == base_domain)]
+            ip = dest_ip if dest_ip and dest_ip in (named.get("ips") or ()) else None
+        else:
+            domains = [base_domain] if base_domain else []
+            ip = dest_ip
+        for name in domains:
+            if not is_telemetry_domain(etld1(name) or name):
+                self.local_intel.record("domain", name, device_id, reason=reason, ttl_seconds=ttl_seconds,
+                                        source=source)
+        if not ip or ip == "unknown" or self._is_ip_protected_from_confirmed_intel(ip, asn_owner=asn_owner):
+            return
+        # `dest_port`: the port the device itself used for the address, when known. A VPN tunnel endpoint
+        # (utils.VPN_TUNNEL_PORTS) is shared infrastructure: never recorded, whichever device used it.
+        if is_vpn_tunnel_port(dest_port):
+            LOGGER.info("Not recording %s as confirmed intel: reached on VPN tunnel port %s", ip, dest_port)
+            return
+        if not asn_owner or asn_owner == "Unknown":
+            LOGGER.info("Not recording %s as confirmed intel: its network owner is unknown", ip)
+            return
+        self.local_intel.record("ip", ip, device_id, reason=reason, ttl_seconds=ttl_seconds, source=source)
 
     def record_operator_confirmation(self, device_id: str, signature: str = "") -> None:
         """A person said this alert was a real threat (Telegram "real threat", an approved isolation or domain block).
@@ -799,7 +833,7 @@ class ClAfpeEngine:
             LOGGER.exception("Failed to write the training record (non-fatal)")
 
     def check_local_intel_hard_stop(self, base_domain: Optional[str], dest_ip: Optional[str],
-                                       asn_owner: str = "") -> Optional[Dict[str, Any]]:
+                                       asn_owner: str = "", domain: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Stage-1 check 7: once ANY device on this network was confirmed touching
         this domain/IP, a DIFFERENT device touching the SAME IOC doesn't have to
         re-earn independent corroboration from scratch. Re-checks the SAME
@@ -810,13 +844,19 @@ class ClAfpeEngine:
 
         Returns {"target": str, "kind": "domain"|"ip", "entry": dict} for the
         caller to build a trigger/reason string from, or None if nothing matched
-        (including when no LocalConfirmedIntel was ever injected)."""
+        (including when no LocalConfirmedIntel was ever injected).
+
+        2026-10-14: the store returns only entries a feed or a person confirmed (local_intel.honored()); a feed entry is
+        the exact name it listed, so the alert's full `domain` is checked before its base. A domain established on this
+        network (local popularity: several devices, many days) is shared infrastructure -- honoured only when a feed
+        confirmed it."""
         if self.local_intel is None:
             return None
-        domain_hit_eligible = bool(base_domain) and not is_telemetry_domain(base_domain)
-        local_domain_hit = self.local_intel.check("domain", base_domain) if domain_hit_eligible else None
-        if local_domain_hit:
-            return {"target": base_domain, "kind": "domain", "entry": local_domain_hit}
+        if base_domain and not is_telemetry_domain(base_domain):
+            for name in dict.fromkeys(n for n in (domain, base_domain) if n):
+                hit = self.local_intel.check("domain", name)
+                if hit and ("feed" in (hit.get("confirmed_by") or ()) or not self._domain_established(name)):
+                    return {"target": name, "kind": "domain", "entry": hit}
         ip_hit_eligible = bool(dest_ip) and dest_ip != "unknown" \
             and not self._is_ip_protected_from_confirmed_intel(dest_ip, asn_owner=asn_owner)
         local_ip_hit = self.local_intel.check("ip", dest_ip) if ip_hit_eligible else None
@@ -894,7 +934,7 @@ class ClAfpeEngine:
             triggers.append(f"Exfiltration Payload Burst (outbound_bytes_z={out_z:.2f}, bytes={int(out_bytes)})")
 
         # Check 7: local confirmed-threat store (Phase 6b, reused directly).
-        local_hit = self.check_local_intel_hard_stop(base_domain, dest_ip, asn_owner=asn_owner)
+        local_hit = self.check_local_intel_hard_stop(base_domain, dest_ip, asn_owner=asn_owner, domain=domain)
         if local_hit:
             entry = local_hit["entry"]
             triggers.append(
@@ -973,7 +1013,7 @@ class ClAfpeEngine:
                         base_domain if self._is_domain_causal_hard_stop(stage1_triggers) else None,
                         dest_ip, reason="TRUST_CACHE_OVERRIDDEN_BY_HARD_STOP", asn_owner=asn_owner,
                         signature=alert_hypothesis, dest_port=_dest_port_for(features, dest_ip),
-                        source=_confirmation_source(stage1_triggers),
+                        source=_confirmation_source(stage1_triggers), feed_named=features.get("ti_matched"),
                     )
                 return {
                     "verdict": CONFIRMED_THREAT if independent else PREVIOUSLY_FLAGGED, "confidence": 0.0,
@@ -1003,6 +1043,7 @@ class ClAfpeEngine:
                     base_domain if self._is_domain_causal_hard_stop(stage1_triggers) else None,
                     dest_ip, reason="STAGE_1_HARD_STOP", asn_owner=asn_owner, signature=alert_hypothesis,
                     dest_port=_dest_port_for(features, dest_ip), source=_confirmation_source(stage1_triggers),
+                    feed_named=features.get("ti_matched"),
                 )
             return {
                 # Only the local confirmed-intel match fired: another device's earlier confirmation. Still never
@@ -1047,7 +1088,11 @@ class ClAfpeEngine:
             if self.store.is_own_registered_device(dest_ip):
                 ti_risk = float(features.get("ti_risk", 0.0) or 0.0)
                 abuseipdb_risk = float(features.get("abuseipdb_risk", 0.0) or 0.0)
-                if ti_risk == 0.0 and abuseipdb_risk == 0.0:
+                # 2026-10-14 (0c Step 3): risk 0.0 is also what a source that is off, stale or failing writes. "Clean"
+                # needs the threat-intel lists to have answered and no switched-on source to have failed to answer;
+                # a payload without the record (written before) keeps the old risk-only rule.
+                _rep_clean = reputation_source_status.verified_clean(features.get("reputation_sources"))
+                if ti_risk == 0.0 and abuseipdb_risk == 0.0 and _rep_clean is not False:
                     evidence_types_this_cycle = decision.get("evidence_types", []) if decision else []
                     evidence_families_this_cycle = decision.get("evidence_families", []) if decision else []
                     behavior_fingerprint = derive_activity_state(evidence_types_this_cycle)

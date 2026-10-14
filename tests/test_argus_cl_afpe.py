@@ -305,7 +305,7 @@ check("'unknown'/empty IPs are never protected (nothing to protect)",
 
 # record_confirmed_threat / check_local_intel_hard_stop with NO LocalConfirmedIntel
 # injected -- a safe no-op throughout, never raises.
-cl_afpe_no_intel.record_confirmed_threat("dev_x", "evil-noop.example.com", "203.0.113.9", reason="test")
+cl_afpe_no_intel.record_confirmed_threat("dev_x", "evil-noop.example.com", "203.0.113.9", reason="test", source="operator", asn_owner="Example Hosting Ltd")
 check("record_confirmed_threat with local_intel=None is a safe no-op",
       cl_afpe_no_intel.check_local_intel_hard_stop("evil-noop.example.com", "203.0.113.9") is None)
 
@@ -317,7 +317,7 @@ cl_afpe_intel = ClAfpeEngine(store, local_intel=real_local_intel, safe_ips={"192
 check("check_local_intel_hard_stop finds nothing before any confirmation is recorded",
       cl_afpe_intel.check_local_intel_hard_stop("evil-confirmed.example.com", "104.16.132.229") is None)
 
-cl_afpe_intel.record_confirmed_threat("dev_a", "evil-confirmed.example.com", "104.16.132.229", reason="Stage-1 test")
+cl_afpe_intel.record_confirmed_threat("dev_a", "evil-confirmed.example.com", "104.16.132.229", reason="Stage-1 test", source="operator", asn_owner="Example Hosting Ltd")
 domain_hit = cl_afpe_intel.check_local_intel_hard_stop("evil-confirmed.example.com", "unknown")
 check("a domain confirmed by one device is found by check_local_intel_hard_stop for "
       "a DIFFERENT device querying the SAME domain -- the actual network-wide "
@@ -329,13 +329,13 @@ check("the same confirmation is ALSO found via its IP independently",
       ip_hit is not None and ip_hit["kind"] == "ip" and ip_hit["target"] == "104.16.132.229")
 
 # write-side telemetry-domain guard
-cl_afpe_intel.record_confirmed_threat("dev_b", "sentry.io", "unknown", reason="mis-attributed")
+cl_afpe_intel.record_confirmed_threat("dev_b", "sentry.io", "unknown", reason="mis-attributed", source="operator", asn_owner="Example Hosting Ltd")
 check("record_confirmed_threat REFUSES to write a known-telemetry base domain as "
       "confirmed-malicious -- the real live-incident guard this ports",
       cl_afpe_intel.check_local_intel_hard_stop("sentry.io", None) is None)
 
 # write-side protected-IP guard (safe_ips)
-cl_afpe_intel.record_confirmed_threat("dev_c", None, "192.168.1.94", reason="mis-attributed")
+cl_afpe_intel.record_confirmed_threat("dev_c", None, "192.168.1.94", reason="mis-attributed", source="operator", asn_owner="Example Hosting Ltd")
 check("record_confirmed_threat REFUSES to write a safe_ips-protected IP as "
       "confirmed-malicious",
       cl_afpe_intel.check_local_intel_hard_stop(None, "192.168.1.94") is None)
@@ -345,7 +345,7 @@ check("record_confirmed_threat REFUSES to write a safe_ips-protected IP as "
 # recorded before this project's own telemetry allowlist grew to cover it) still
 # doesn't get honored -- the real v1 fix: "stops being honored immediately, without
 # needing to hand-edit the state file," not just "never written going forward."
-real_local_intel.record("domain", "sentry.io", "dev_d", reason="pre-existing, bypassed the write guard")
+real_local_intel.record("domain", "sentry.io", "dev_d", reason="pre-existing, bypassed the write guard", source="feed")
 check("check_local_intel_hard_stop re-applies the telemetry guard on the READ side "
       "independently of the write guard -- an entry that got in some other way "
       "still doesn't match",
@@ -553,7 +553,9 @@ store.upsert_device("shadow_victim", timestamp=NOW)
 # already cover for the write guard in isolation -- this proves it end-to-end
 # through the composed evaluate().
 confirm_verdict = _evaluate(cl_afpe_with_intel, _alert(
-    device_id="shadow_confirmer", hostname="confirmer", features={"ti_risk": 3.0},
+    # ti_matched: what the curated lists actually named (2026-10-14: a feed adds exactly that, nothing else)
+    device_id="shadow_confirmer", hostname="confirmer",
+    features={"ti_risk": 3.0, "ti_matched": {"domains": ["evil-shadow-example.com"], "ips": []}},
     domain="evil-shadow-example.com", dest_ip="203.0.113.9"))
 check("a genuine Stage-1 hard-stop with local_intel wired in records the confirmation "
       "(setup step for the cross-device propagation check below)",
@@ -720,6 +722,28 @@ check("an alert whose SIGNATURE is a hard-stop verdict is refused by "
       "conditions are otherwise satisfied -- the safety net is shared, not "
       "reimplemented, across every autonomous source",
       v.get("stage") != "STAGE_1B_LOCAL_ORIGIN")
+
+# --- 2026-10-14 (0c Step 3): risk 0.0 from a source that did not answer is not "clean" ---
+_UNCHECKED_TI = {"threat_intel": {"state": "not_checked", "reason": "stale"},
+                 "abuseipdb": {"state": "not_checked", "reason": "off"},
+                 "virustotal": {"state": "not_checked", "reason": "off"}}
+store.upsert_device("lo_dev_stale_ti", timestamp=NOW)
+store.upsert_device("lo_dest_stale_ti", timestamp=NOW)
+store.update_device_metadata("lo_dest_stale_ti", {"known_ips_history": {"10.20.30.46": NOW}}, timestamp=NOW)
+_stale_stages = [
+    _evaluate(cl_afpe, _own_device_alert("lo_dev_stale_ti", "10.20.30.46", {"reputation_sources": _UNCHECKED_TI}),
+              decision=decision).get("stage")
+    for _ in range(5)]
+check("[source status] threat-intel lists out of date (risk 0.0 written, nothing checked): never auto-resolves "
+      "via Stage 1b, however often it recurs", "STAGE_1B_LOCAL_ORIGIN" not in _stale_stages, str(_stale_stages))
+
+_CLEAN_DEFAULT = {"threat_intel": {"state": "clean", "reason": ""},
+                  "abuseipdb": {"state": "not_checked", "reason": "off"},
+                  "virustotal": {"state": "not_checked", "reason": "off"}}
+_run_local_origin_sequence(
+    "lists checked clean, optional sources off (shipped default)", "lo_dev_checked", "lo_dest_checked", "10.20.30.47",
+    {"reputation_sources": _CLEAN_DEFAULT},
+)
 
 store.close()
 

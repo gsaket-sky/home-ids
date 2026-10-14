@@ -101,7 +101,7 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
           facebook_protected)
 
     fp.record_confirmed_threat("dev_apple_test", None, "17.57.146.55", reason="TEST",
-                                asn_owner="Apple Inc.")
+                                asn_owner="Apple Inc.", source="operator")
     apple_hit = fp.local_intel.check("ip", "17.57.146.55")
     check("record_confirmed_threat() REFUSES to write an Apple-owned IP into local_intel",
           apple_hit is None, f"got {apple_hit}")
@@ -110,7 +110,7 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
     # ipaddress module classifies those as is_private=True, which would trip this guard
     # for an unrelated reason and defeat the point of this regression check.
     fp.record_confirmed_threat("dev_evil_test", None, "45.33.32.156", reason="TEST",
-                                asn_owner="Definitely Evil Hosting LLC")
+                                asn_owner="Definitely Evil Hosting LLC", source="operator")
     evil_hit = fp.local_intel.check("ip", "45.33.32.156")
     check("REGRESSION GUARD: an unrelated hosting-provider IP is still recorded normally",
           evil_hit is not None, f"got {evil_hit}")

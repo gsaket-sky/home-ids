@@ -47,6 +47,12 @@ def _effective_arp_sweep_threshold(fp, device_id, default=8.0):
         default=fp.get_device_arp_sweep_threshold(device_id, default=default))
 
 
+# 2026-10-14: only a feed or a person may add to the store (the engine's own judgement counts but writes nothing),
+# and an address needs a known network owner -- the write-guard checks below confirm as a person so that the guard
+# under test is what refuses.
+_OP = {"source": "operator", "asn_owner": "Example Hosting Ltd"}
+
+
 def _fp(state_dir, safe_ips=None):
     """The live CL-AFPE on the same graph file the nightly calibration reads (state/v13_graph.db), with the shared
     confirmed-intel store in state_dir."""
@@ -63,8 +69,8 @@ from argus.graph.store import GraphStore
 with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
     intel = LocalConfirmedIntel(tmpdir, ttl_seconds=3600.0)
 
-    check("record() returns True for a genuinely new IOC", intel.record("ip", "1.2.3.4", "devA") is True)
-    check("record() returns False on a repeat (refresh, not new)", intel.record("ip", "1.2.3.4", "devB") is False)
+    check("record() returns True for a genuinely new IOC", intel.record("ip", "1.2.3.4", "devA", source="feed") is True)
+    check("record() returns False on a repeat (refresh, not new)", intel.record("ip", "1.2.3.4", "devB", source="feed") is False)
     check("check() finds a recorded, non-expired IOC", intel.check("ip", "1.2.3.4") is not None)
     check("check() returns None for a never-recorded value", intel.check("ip", "9.9.9.9") is None)
     check("an invalid kind is rejected safely", intel.record("ja3", "somehash", "devA") is False)
@@ -77,7 +83,7 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
 
     # TTL expiry
     intel2 = LocalConfirmedIntel(tmpdir + "_ttl", ttl_seconds=1.0)
-    intel2.record("domain", "evil.example.com", "devC")
+    intel2.record("domain", "evil.example.com", "devC", source="feed")
     check("a fresh entry is not expired", intel2.check("domain", "evil.example.com") is not None)
     with intel2._lock:
         intel2._store["domain"]["evil.example.com"]["last_confirmed"] = time.time() - 10.0
@@ -100,7 +106,7 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
     fp = _fp(tmpdir)
 
     fp.record_confirmed_threat("dev_A", "malicious-c2.example", "6.6.6.6",
-                                reason="STAGE_1_HARD_STOP", signature="DATA_EXFILTRATION")
+                                reason="STAGE_1_HARD_STOP", **_OP, signature="DATA_EXFILTRATION")
 
     check("record_confirmed_threat() feeds local_intel with the domain",
           fp.local_intel.check("domain", "malicious-c2.example") is not None)
@@ -123,7 +129,7 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
     # DOMAIN, far too coarse for huge shared vendor domains, where one
     # wrongly-attributed confirmation poisons every future connection to ANY
     # subdomain, for EVERY device on the network.
-    fp.record_confirmed_threat("dev_A", "amazon.com", "8.8.8.8", reason="STAGE_1_HARD_STOP")
+    fp.record_confirmed_threat("dev_A", "amazon.com", "8.8.8.8", reason="STAGE_1_HARD_STOP", **_OP)
     check("THE CORE FIX (write side): record_confirmed_threat() refuses to record a "
           "known-safe base domain (amazon.com) as confirmed-malicious",
           fp.local_intel.check("domain", "amazon.com") is None)
@@ -138,7 +144,7 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
     # must stop being honored -- bypass the now-fixed write guard directly to prove the
     # read-side check works independently, since the real poisoned entries won't
     # disappear from disk until their TTL expires.
-    fp.local_intel.record("domain", "netflix.com", "some_other_device", reason="STAGE_1_HARD_STOP")
+    fp.local_intel.record("domain", "netflix.com", "some_other_device", reason="STAGE_1_HARD_STOP", source="feed")
     check("the simulated pre-existing poisoned entry is really there before the read-side check",
           fp.local_intel.check("domain", "netflix.com") is not None)
     poisoned_alert = {
@@ -160,7 +166,7 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
           poisoned_verdict["stage"] != "STAGE_1_HARD_STOP", f"got={poisoned_verdict}")
 
     # REGRESSION GUARD: an unrelated, genuinely malicious domain is completely unaffected.
-    fp.record_confirmed_threat("dev_E", "still-malicious.example", "9.9.9.9", reason="STAGE_1_HARD_STOP")
+    fp.record_confirmed_threat("dev_E", "still-malicious.example", "9.9.9.9", reason="STAGE_1_HARD_STOP", **_OP)
     check("REGRESSION GUARD: a genuinely unrelated (non-safe-listed) domain is still "
           "recorded and still hard-stops normally -- the fix is scoped to known-safe "
           "domains only",
@@ -173,14 +179,14 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
     # 192.168.1.1 (the router) had 121; multicast addresses (ff02::fb, 224.0.0.22,
     # 224.0.0.251 -- not real hosts) had hundreds each. Proved safe_ips was never
     # actually consulted by this store despite its own config.yaml docstring's promise.
-    fp.record_confirmed_threat("dev_F", "", "192.168.1.94", reason="HIGH_CRITICAL_DECISION")
+    fp.record_confirmed_threat("dev_F", "", "192.168.1.94", reason="HIGH_CRITICAL_DECISION", **_OP)
     check("THE CORE FIX (write side, IP): record_confirmed_threat() refuses to record a "
           "private LAN IP (192.168.1.94, this network's own server) as confirmed-malicious",
           fp.local_intel.check("ip", "192.168.1.94") is None)
-    fp.record_confirmed_threat("dev_G", "", "224.0.0.251", reason="STAGE_1_HARD_STOP")
+    fp.record_confirmed_threat("dev_G", "", "224.0.0.251", reason="STAGE_1_HARD_STOP", **_OP)
     check("a multicast address (224.0.0.251, mDNS -- not even a real host) is refused too",
           fp.local_intel.check("ip", "224.0.0.251") is None)
-    fp.record_confirmed_threat("dev_H", "", "ff02::fb", reason="STAGE_1_HARD_STOP")
+    fp.record_confirmed_threat("dev_H", "", "ff02::fb", reason="STAGE_1_HARD_STOP", **_OP)
     check("an IPv6 multicast address (ff02::fb, mDNS) is refused too",
           fp.local_intel.check("ip", "ff02::fb") is None)
 
@@ -190,13 +196,13 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
     # KNOWN_PUBLIC_DNS_RESOLVERS (utils.py) is shared with dns_evasion.py's existing
     # known-resolver exemption -- same list, same reasoning, now also protecting this
     # store's write AND read paths.
-    fp.record_confirmed_threat("dev_H2", "", "8.8.8.8", reason="STAGE_1_HARD_STOP")
+    fp.record_confirmed_threat("dev_H2", "", "8.8.8.8", reason="STAGE_1_HARD_STOP", **_OP)
     check("THE FIX: a well-known public DNS resolver (8.8.8.8) is refused too",
           fp.local_intel.check("ip", "8.8.8.8") is None)
 
     # Read-side guard: an ALREADY-poisoned private IP (simulating what production found
     # on disk before this fix existed) must stop being honored, same as the domain case.
-    fp.local_intel.record("ip", "192.168.1.1", "some_other_device", reason="STAGE_1_HARD_STOP")
+    fp.local_intel.record("ip", "192.168.1.1", "some_other_device", reason="STAGE_1_HARD_STOP", source="feed")
     check("the simulated pre-existing poisoned IP entry is really there before the read-side check",
           fp.local_intel.check("ip", "192.168.1.1") is not None)
     poisoned_ip_alert = {
@@ -215,7 +221,7 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
     # ... even if flagged elsewhere").
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir2:
         fp_with_config = _fp(tmpdir2, safe_ips=["203.0.113.50"])
-        fp_with_config.record_confirmed_threat("dev_J", "", "203.0.113.50", reason="STAGE_1_HARD_STOP")
+        fp_with_config.record_confirmed_threat("dev_J", "", "203.0.113.50", reason="STAGE_1_HARD_STOP", **_OP)
         check("an explicitly-configured safe_ips entry (a PUBLIC IP, not automatically "
               "private) is also refused -- safe_ips' own documented promise, honored for "
               "the first time by this store",
@@ -234,7 +240,7 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
     # is_private=True -- confirmed live, that was this test's first replacement
     # attempt and it ALSO failed, for a reason unrelated to this fix) and not a known
     # resolver.
-    fp.record_confirmed_threat("dev_K", "", "93.184.216.34", reason="STAGE_1_HARD_STOP")
+    fp.record_confirmed_threat("dev_K", "", "93.184.216.34", reason="STAGE_1_HARD_STOP", **_OP)
     check("REGRESSION GUARD: a genuinely unrelated public IP is still recorded and "
           "still hard-stops normally -- the fix is scoped to private/multicast/"
           "safe-listed/known-public-resolver IPs only",
@@ -310,9 +316,11 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir_b2:
     check("THE FIX: a lateral-movement-only hard-stop does NOT poison the bystander "
           "domain in local_intel",
           fp_b2.local_intel.check("domain", "sharepoint.com") is None)
-    check("...but DOES still record the dest_ip -- lateral movement's target IS "
-          "causally the right thing to remember",
-          fp_b2.local_intel.check("ip", "5.5.5.5") is not None)
+    # 2026-10-14 (0c Step 3): a behavioural hard stop is the engine's own judgement -- it counts the confirmation but
+    # adds nothing to the network-wide store (before: the dest_ip was recorded; on .94 that is how provider, messaging
+    # and VPN addresses filled the store).
+    check("...and does not record the dest_ip either: a behavioural hard stop is not a feed or a person",
+          fp_b2.local_intel.check("ip", "5.5.5.5", honored_only=False) is None)
 
     # Check 5 (AbuseIPDB) fires; different innocent bystander domain.
     abuse_alert = _make_alert("coinbase.com", {})
@@ -324,7 +332,7 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir_b2:
     # have a real causal link -- a genuine domain-blacklist hit must still poison the
     # domain as before, or the fix would have thrown out real detection value too.
     ti_alert = _make_alert("actually-malicious-c2.example", {})
-    fp_b2.evaluate(ti_alert, {"ti_risk": 3.5})
+    fp_b2.evaluate(ti_alert, {"ti_risk": 3.5, "ti_matched": {"domains": ["actually-malicious-c2.example"], "ips": []}})
     check("REGRESSION GUARD: a genuine ThreatIntel IOC hit still records its domain "
           "as confirmed-malicious -- the fix is scoped to non-domain-causal checks only",
           fp_b2.local_intel.check("domain", "actually-malicious-c2.example") is not None)

@@ -37,6 +37,29 @@ LOGGER = logging.getLogger("home_ids.local_intel")
 _KINDS = ("ip", "domain")
 DEFAULT_TTL_SECONDS = 30 * 86400.0
 
+# Who may confirm (2026-10-14, MASTER_TODO 0c Step 3): a curated threat-intel feed or a person. The engine's own
+# judgement ("automatic") once filled this store with provider, messaging and VPN addresses (69 entries archived on
+# .94 on 10-13; within a day it held a VPN server again), so it may count a confirmation but never add an entry.
+HONORED_SOURCES = ("feed", "operator")
+# An entry this many devices were confirmed on or touched is shared infrastructure (a VPN server, a provider
+# address): honoured only when a feed confirmed it. Same floor as local_popularity.MIN_DEVICES.
+SHARED_MIN_DEVICES = 3
+
+
+def honored(entry: Optional[dict]) -> bool:
+    """True when the store may act on `entry`: a feed confirmed it, or a person did and fewer than SHARED_MIN_DEVICES
+    devices are on it. An entry without `confirmed_by` (written before 2026-10-14, or by the engine itself) is not
+    honoured -- the read-side floor that neutralises earlier bad data without a migration (CLAUDE.md pre-flight 3)."""
+    if not entry:
+        return False
+    by = set(entry.get("confirmed_by") or ())
+    if "feed" in by:
+        return True
+    if "operator" not in by:
+        return False
+    devices = set(entry.get("sources") or ()) | set(entry.get("implicated") or ())
+    return len(devices) < SHARED_MIN_DEVICES
+
 
 class LocalConfirmedIntel:
     def __init__(self, state_dir, ttl_seconds: float = DEFAULT_TTL_SECONDS):
@@ -58,13 +81,14 @@ class LocalConfirmedIntel:
         return float(ttl) if ttl else self._ttl
 
     def record(self, kind: str, value: str, device_id: str, reason: str = "",
-               ttl_seconds: Optional[float] = None) -> bool:
+               ttl_seconds: Optional[float] = None, source: str = "automatic") -> bool:
         """Records a confirmed IOC. Returns True if this is a NEW entry, False if it
         was a refresh of an already-known one -- same is_new convention as
         the CL-AFPE's _immunize_domain(). `ttl_seconds` (PHASE 67, optional) overrides
         the instance-wide default for THIS entry only -- same per-entry-override shape
         as the CL-AFPE's trust cache (Phase 52); None (every caller before this phase)
-        means "use the instance default", not "no TTL"."""
+        means "use the instance default", not "no TTL". `source` ("feed", "operator", "automatic") is kept in the
+        entry's `confirmed_by`; only HONORED_SOURCES make it count on read (honored())."""
         if kind not in _KINDS or not value or str(value).lower() in ("unknown", "null", "none", ""):
             return False
         now = time.time()
@@ -79,12 +103,16 @@ class LocalConfirmedIntel:
                 sources = existing.setdefault("sources", [])
                 if device_id not in sources:
                     sources.append(device_id)
+                by = existing.setdefault("confirmed_by", [])
+                if source and source not in by:
+                    by.append(source)
                 if ttl_seconds:
                     existing["ttl_seconds"] = float(ttl_seconds)
             else:
                 bucket[value] = {
                     "first_confirmed": now, "last_confirmed": now, "count": 1,
                     "sources": [device_id], "reason": reason,
+                    "confirmed_by": [source] if source else [],
                     "ttl_seconds": float(ttl_seconds) if ttl_seconds else self._ttl,
                 }
         self._save()
@@ -104,34 +132,37 @@ class LocalConfirmedIntel:
         self._refresh_if_changed()
         with self._lock:
             entry = self._store[kind].get(value)
-            if not entry or device_id in entry.get("sources", []) or device_id in entry.get("implicated", []):
+            if not entry or not honored(entry) or device_id in entry.get("sources", []) or device_id in entry.get("implicated", []):
                 return False
             entry.setdefault("implicated", []).append(device_id)
         self._save()
         return True
 
-    def check(self, kind: str, value: str) -> Optional[dict]:
+    def check(self, kind: str, value: str, honored_only: bool = True) -> Optional[dict]:
         """Returns the (non-expired) entry for value, or None if it isn't a confirmed
-        IOC of this kind, or its TTL has lapsed."""
+        IOC of this kind, or its TTL has lapsed. By default only an entry the store may act on (honored());
+        `honored_only=False` is for maintenance tools that list everything on disk."""
         if kind not in _KINDS or not value:
             return None
         now = time.time()
         self._refresh_if_changed()
         with self._lock:
             entry = self._store[kind].get(value)
-        if entry and (now - entry["last_confirmed"]) < self._entry_ttl(entry):
+        if entry and (now - entry["last_confirmed"]) < self._entry_ttl(entry) \
+                and (not honored_only or honored(entry)):
             return entry
         return None
 
-    def all_confirmed(self, kind: str) -> Set[str]:
+    def all_confirmed(self, kind: str, honored_only: bool = True) -> Set[str]:
         """All non-expired confirmed values of one kind -- used by retro_hunter.py's
-        retroactive cross-device re-scan."""
+        retroactive cross-device re-scan. Honoured entries only unless `honored_only=False`."""
         if kind not in _KINDS:
             return set()
         now = time.time()
         self._refresh_if_changed()
         with self._lock:
-            return {v for v, e in self._store[kind].items() if (now - e["last_confirmed"]) < self._entry_ttl(e)}
+            return {v for v, e in self._store[kind].items() if (now - e["last_confirmed"]) < self._entry_ttl(e)
+                    and (not honored_only or honored(e))}
 
     def prune_expired(self) -> int:
         """Removes expired entries across all kinds. Returns the count pruned. Meant

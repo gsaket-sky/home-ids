@@ -196,8 +196,8 @@ intel_store.insert_evidence(Evidence(device_id="li_dev_d", destination_id="never
                                        timestamp=NOW - 3600, source="test", confidence=0.5, value=1.0))
 
 # li_dev_a is the confirming device itself -- its OWN prior touch is not a new finding.
-local_intel.record("domain", "already-confirmed.example.com", "li_dev_a", reason="STAGE_1_HARD_STOP")
-local_intel.record("ip", "203.0.113.44", "li_dev_z", reason="STAGE_1_HARD_STOP")
+local_intel.record("domain", "already-confirmed.example.com", "li_dev_a", reason="STAGE_1_HARD_STOP", source="feed")
+local_intel.record("ip", "203.0.113.44", "li_dev_z", reason="STAGE_1_HARD_STOP", source="feed")
 
 intel_hunter = RetroHunter(intel_store, threat_intel_lookup=lambda d: None)
 li_matches = intel_hunter.check_local_intel_history(local_intel, days_back=14, now=NOW)

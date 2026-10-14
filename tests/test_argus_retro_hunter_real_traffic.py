@@ -100,7 +100,7 @@ check("real ThreatIntel wired through ip_lookup finds the address", [(f.device_i
 
 # Local-intel cross-reference sees quiet traffic.
 li = LocalConfirmedIntel(str(tmp / "li"))
-li.record("ip", "198.51.100.9", "other-dev", "STAGE_1_HARD_STOP")
+li.record("ip", "198.51.100.9", "other-dev", "STAGE_1_HARD_STOP", source="feed")
 matches = hunter.check_local_intel_history(li, days_back=14, now=NOW + 600)
 check("local-intel cross-reference finds a device that quietly touched a since-confirmed IP",
       [(m["device_id"], m["matched_value"]) for m in matches] == [("dev1", "198.51.100.9")], str(matches))

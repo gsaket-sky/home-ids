@@ -60,9 +60,9 @@ check("...and no temp file", [f.name for f in tmp.iterdir() if f.name.endswith("
 # --- LocalConfirmedIntel.remove / the CLI -------------------------------------------------------------------------
 state = tmp / "state"
 store = LocalConfirmedIntel(state)
-store.record("ip", "198.51.100.7", "dev_a", reason="TEST")
-store.record("ip", "198.51.100.8", "dev_a", reason="TEST")
-store.record("domain", "bad.example", "dev_a", reason="TEST")
+store.record("ip", "198.51.100.7", "dev_a", reason="TEST", source="feed")
+store.record("ip", "198.51.100.8", "dev_a", reason="TEST", source="feed")
+store.record("domain", "bad.example", "dev_a", reason="TEST", source="feed")
 intel_path = state / "local_confirmed_intel.json"
 
 rc = cci._remove_chosen(intel_path, ["198.51.100.7", "bad.example"], apply_changes=False)
@@ -75,7 +75,7 @@ check("--apply removes the address as an IP entry and the name as a domain entry
 check("the other entry stays", other.check("ip", "198.51.100.8") is not None)
 check("a running store sees the removal (mtime reload) and can still write",
       store.check("ip", "198.51.100.7") is None)
-store.record("ip", "198.51.100.9", "dev_b", reason="T")
+store.record("ip", "198.51.100.9", "dev_b", reason="T", source="feed")
 check("...and its next write keeps the removal (does not resurrect the entry) and the other entries",
       LocalConfirmedIntel(state).check("ip", "198.51.100.7") is None
       and LocalConfirmedIntel(state).check("ip", "198.51.100.8") is not None

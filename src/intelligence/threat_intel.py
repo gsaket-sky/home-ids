@@ -25,7 +25,7 @@ import zipfile
 import io
 import requests
 from pathlib import Path
-from typing import Optional, Dict, Set
+from typing import Optional, Dict, Set, Tuple
 from urllib.request import urlopen, Request
 from urllib.error import URLError
 
@@ -147,7 +147,10 @@ class ThreatIntel:
 
         self._lock = threading.RLock()
         self._stats = {"ips": 0, "domains": 0, "urls": 0, "cidrs": 0, "last_refresh": "never"}
-        
+        # When the IOC lists last held fresh feed data (epoch): a refresh in which at least one feed parsed, or the
+        # restored cache's save time. None = nothing loaded yet. Read by check_status().
+        self._last_loaded_at: Optional[float] = None
+
         # Curated single-tenant apex domains where parent wildcard matching is safe
         self._static_allowlist = frozenset({
             "raw.githubusercontent.com", "githubusercontent.com", "github.com", 
@@ -179,6 +182,26 @@ class ThreatIntel:
         detection behavior."""
         with self._lock:
             return self._stats.get("last_refresh", "never") != "never"
+
+    # A refresh cycle that loaded no indicator still stamps last_refresh, and a failed fetch keeps the prior lists: a
+    # "no match" is a clean check only while the lists are loaded and were refreshed recently.
+    FEED_MAX_AGE_SECONDS = 2 * 86400
+
+    def check_status(self, now: Optional[float] = None) -> Tuple[bool, str]:
+        """(checked, reason): whether a lookup's "no match" means "checked, not listed" (2026-10-14, Step 3). The reason
+        names why not: paused, not loaded, empty, stale."""
+        if self.paused:
+            return False, "paused"
+        with self._lock:
+            loaded_at = self._last_loaded_at
+            empty = not (self._bad_ips or self._bad_domains or self._bad_urls or self._bad_cidrs)
+        if loaded_at is None:
+            return False, "not loaded"
+        if empty:
+            return False, "empty"
+        if (now if now is not None else time.time()) - loaded_at > self.FEED_MAX_AGE_SECONDS:
+            return False, "stale"
+        return True, ""
 
     def is_allowlisted(self, domain: str, trust_cache: Optional[set] = None) -> bool:
         """
@@ -671,6 +694,7 @@ class ThreatIntel:
 
     def _refresh_all(self) -> None:
         LOGGER.info("Initiating intelligence feed update cycle...")
+        newest_data_at = None   # the freshest parsed feed's data time (a failed fetch returns the old cached copy)
         for feed_name, feed in _FEEDS.items():
             if feed.get("keyed") and not self.advanced_feeds:
                 continue
@@ -704,6 +728,8 @@ class ThreatIntel:
                     self._feed_domains[feed_name] = feed_domains
                     self._feed_urls[feed_name] = feed_urls
                     self._feed_cidrs[feed_name] = feed_cidrs
+                    data_at = cache_file.stat().st_mtime if cache_file.exists() else time.time()
+                    newest_data_at = data_at if newest_data_at is None else max(newest_data_at, data_at)
                     LOGGER.debug("Successfully parsed feed '%s' (IPs: %d, Domains: %d, URLs: %d)", 
                                  feed_name, len(feed_ips), len(feed_domains), len(feed_urls))
                 else:
@@ -736,6 +762,8 @@ class ThreatIntel:
                 "cidrs": len(combined_cidrs), 
                 "last_refresh": time.strftime("%Y-%m-%d %H:%M:%S")
             })
+            if newest_data_at is not None:
+                self._last_loaded_at = max(newest_data_at, self._last_loaded_at or 0.0)
         self._save_cache(combined_ips, combined_domains, combined_urls, combined_cidrs)
         LOGGER.info("ThreatIntel update complete. Loaded %d IPs, %d Domains, %d URLs.", 
                     len(combined_ips), len(combined_domains), len(combined_urls))
@@ -836,8 +864,9 @@ class ThreatIntel:
                 "ips": ips, 
                 "domains": domains, 
                 "urls": urls, 
-                "cidrs": [[str(n), m] for n, m in cidrs], 
-                "saved": time.time()
+                "cidrs": [[str(n), m] for n, m in cidrs],
+                "saved": time.time(),
+                "data_at": self._last_loaded_at,
             }
             from core.file_lock import atomic_write_gzip_json   # engine and retro-hunter both write it (finding 4.5)
             atomic_write_gzip_json(self.cache_dir / "combined.json.gz", payload)
@@ -867,6 +896,8 @@ class ThreatIntel:
                 self._bad_domains = payload.get("domains", {})
                 self._bad_urls = payload.get("urls", {})
                 self._bad_cidrs = cidrs
+                # data_at: when the feeds' data was fetched (absent in caches written before 2026-10-14: save time)
+                self._last_loaded_at = float(payload.get("data_at") or payload.get("saved") or 0) or None
             LOGGER.info("Successfully restored ThreatIntel cache from disk.")
         except Exception as exc: 
             LOGGER.error("Failed to load ThreatIntel cache: %s", exc)
@@ -1148,6 +1179,25 @@ class AbuseIPDB:
                 return min((score / 100.0) * 6.0, 4.0)
         return 0.0
 
+    def check_status(self, ip: str) -> Tuple[str, str]:
+        """(state, reason) for this address (2026-10-14, Step 3): "hit" (blacklisted or a live score above 0),
+        "clean" (a live lookup answered with score 0), or "not_checked" with why -- off (switched off, no key,
+        paused), rate-limited, failed (the lookup errored; cached for an hour), pending (queued, no answer yet)."""
+        if not self.active:
+            return "not_checked", "off"
+        with self._lock:
+            if ip in self._bad_ips:
+                return "hit", ""
+            e = self._live_cache.get(ip)
+            if e and time.time() < e["expires"]:
+                score = (e["result"] or {}).get("abuseConfidenceScore")
+                if score is None:   # failed lookup, or an answer without a score
+                    return "not_checked", "failed"
+                return ("hit", "") if score > 0 else ("clean", "")
+        if time.time() < self._quota_exhausted_until:
+            return "not_checked", "rate-limited"
+        return "not_checked", "pending"
+
     def lookup(self, ip: str) -> bool:
         if not self.active:
             return False
@@ -1237,6 +1287,23 @@ class VirusTotalClient:
         total = sum(s.values()) or 1
         return min(((s.get("malicious", 0) + s.get("suspicious", 0) * 0.5) / total) * 6.0, 4.0)
 
+    def check_status(self, ioc_type: str, value: str) -> Tuple[str, str]:
+        """(state, reason), as AbuseIPDB.check_status (2026-10-14, Step 3). A 404 ("never seen", stored as {}) is a
+        clean answer; a failed lookup is stored as None and is "not_checked"/"failed" until it expires."""
+        if not self.active:
+            return "not_checked", "off"
+        if not value:
+            return "not_checked", "no target"
+        with self._lock:
+            e = self._cache.get(f"{ioc_type}:{value}")
+            if e and time.time() < e["expires"]:
+                if e["result"] is None:
+                    return "not_checked", "failed"
+                return ("hit", "") if self.risk_contribution(ioc_type, value) > 0 else ("clean", "")
+        if time.time() < self._quota_exhausted_until:
+            return "not_checked", "rate-limited"
+        return "not_checked", "pending"
+
     def _worker_loop(self) -> None:
         while True:
             if not self.active or time.time() < self._quota_exhausted_until:
@@ -1305,7 +1372,7 @@ class VirusTotalClient:
                 break
         if last_exc is not None:
             feed_health.record_failure("virustotal", str(last_exc), feed_health.classify_url_error(last_exc))
-        return {}
+        return None   # failed: not a verdict (404 above is the "never seen" answer, {})
 
     def _is_cached(self, key: str) -> bool:
         e = self._cache.get(key)

@@ -84,6 +84,10 @@ check("no port from an unrelated connection", nc.get("destination_port") == 0, s
 check("the alert names the swept set", nc.get("target_set") == {
     "kind": "swept_hosts", "count": 23, "examples": ["10.9.0.2", "10.9.0.3", "10.9.0.4"]}, str(nc))
 check("the target's source evidence is recorded", nc.get("target_source") == "arp_sweep", str(nc))
+_rep = (alert.get("features") or {}).get("reputation_sources") or {}
+check("the alert stores each reputation source's state (hit / clean / not checked), 2026-10-14",
+      set(_rep) == {"threat_intel", "abuseipdb", "virustotal"}
+      and all(e.get("state") in ("hit", "clean", "not_checked") for e in _rep.values()), str(_rep))
 check("signature_base / persisted_seconds are their own fields",
       alert.get("signature_base") == "INTERNAL_RECONNAISSANCE" and alert.get("persisted_seconds") is None, str(alert)[:300])
 

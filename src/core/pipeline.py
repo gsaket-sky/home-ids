@@ -36,6 +36,7 @@ from extractors.fritzbox_capture import ReactiveCaptureDispatcher, cleanup_stale
 from intelligence.hypotheses.evidence import EvidenceStore, Evidence
 from intelligence import ja3_provenance
 from intelligence.reputation.classifier import ReputationClassifier
+from intelligence.reputation import source_status as reputation_source_status
 from intelligence.detectors.dns_behavior import DNSBehaviorDetector
 from intelligence.detectors.zeek_network import ZeekNetworkDetector
 from intelligence.detectors.threat_signals import ThreatSignalDetector  # PHASE 1
@@ -705,7 +706,8 @@ def _resolve_with_timeout(domain: str, timeout: float = 0.5) -> str:
 
 
 def _benign_explanations_checked(target: str, app_name: str, http_reqs, ti_risk: float, abuse_risk: float,
-                                  asn_owner: Optional[str], asn_owner_is_safe: Optional[bool], families) -> list:
+                                  asn_owner: Optional[str], asn_owner_is_safe: Optional[bool], families,
+                                  reputation_sources: Optional[dict] = None) -> list:
     """Lines for the alert's "Ordinary explanations checked" block: each says what was checked and what it found,
     so the reader sees both the case for an attack (WHY) and the case against it. Pure function -- no I/O."""
     lines = []
@@ -742,11 +744,23 @@ def _benign_explanations_checked(target: str, app_name: str, http_reqs, ti_risk:
             else:
                 lines.append(f"✓ `{tgt}` belongs to *{asn_owner}*, not one of the large providers on the safe list")
 
+    # 2026-10-14 (0c Step 3): a source that did not answer is named, never counted as "not listed".
+    unchecked = reputation_source_status.describe_not_checked(reputation_sources)
     if (ti_risk or 0.0) <= 0.0 and (abuse_risk or 0.0) <= 0.0:
-        lines.append("⚠️ The destination is on no threat-intel or AbuseIPDB list -- this alert rests on the device's "
-                     "behaviour or TLS fingerprint, not on where it connected")
+        if reputation_sources is None:   # no per-source record (older payload): what the scores alone say
+            lines.append("⚠️ The destination is on no threat-intel or AbuseIPDB list -- this alert rests on the "
+                         "device's behaviour or TLS fingerprint, not on where it connected")
+        elif reputation_source_status.not_checked(reputation_sources) and not any(
+                (e or {}).get("state") == reputation_source_status.CLEAN for e in reputation_sources.values()):
+            lines.append("⚠️ No reputation source could check the destination -- this alert rests on the device's "
+                         "behaviour or TLS fingerprint, not on where it connected")
+        else:
+            lines.append("⚠️ The destination is on no reputation list that checked it -- this alert rests on the "
+                         "device's behaviour or TLS fingerprint, not on where it connected")
     else:
         lines.append(f"✓ The destination has a reputation score (threat intel {ti_risk:.1f}, AbuseIPDB {abuse_risk:.1f})")
+    if unchecked:
+        lines.append(f"ℹ️ Not checked: {unchecked}")
 
     fams = set(families or [])
     if len(fams) >= 2 and fams <= _ZEEK_DERIVED_FAMILIES:
@@ -1829,6 +1843,10 @@ class EnginePipeline:
                 # nothing needs attribution and top_domain remains a harmless, neutral choice.
                 reputation_target = top_domain
                 ti_risk, ti_match = 0.0, 0
+                # 2026-10-14 (0c Step 3): exactly what the curated lists matched -- the confirmed-intel store adds only
+                # these (a feed hard stop once recorded the alert's base domain and last address on a match on
+                # another name in the window).
+                _ti_matched = {"domains": [], "ips": []}
                 if self.ti_engine:
                     for domain in _rolling_domain_keys:
                         ti_res = self.ti_engine.lookup_domain(domain)
@@ -1838,6 +1856,8 @@ class EnginePipeline:
                                 ti_risk = cur_risk
                                 reputation_target = domain
                             ti_match = 1
+                            if len(_ti_matched["domains"]) < 20:
+                                _ti_matched["domains"].append(domain)
                             ti_ioc_hits_total.labels(source="threat_intel", ioc_type="domain").inc()
                     if _dest_ip_is_real_host:
                         ip_ti_res = self.ti_engine.lookup_ip(dest_ip)
@@ -1853,10 +1873,12 @@ class EnginePipeline:
                                 ti_risk = cur_ip_risk
                                 reputation_target = dest_ip
                             ti_match = 1
+                            _ti_matched["ips"] = [dest_ip]
                             ti_ioc_hits_total.labels(source="threat_intel", ioc_type="ip").inc()
 
                 features["ti_risk"] = ti_risk
                 features["ti_match"] = ti_match
+                features["ti_matched"] = _ti_matched
                 # BUGFIX: the CL-AFPE Stage-2 and train_fp_classifier.py both read
                 # features["tranco_rank"] for Feature 0 of the 11-dim LightGBM vector, but
                 # nothing ever wrote it -- permanently 0 for every alert since this feature
@@ -1917,6 +1939,13 @@ class EnginePipeline:
                             _best_risk_seen = vt_risk
                             reputation_target = vt_risk_source
                 features["vt_risk"] = vt_risk
+                # 2026-10-14 (0c Step 3): each source's hit / clean / not-checked state beside its risk number -- a
+                # source that is off, rate-limited, stale or failed writes risk 0.0 like a clean lookup. Stored with
+                # the alert and its training row; read by CL-AFPE's own-device suppression and the alert text.
+                features["reputation_sources"] = reputation_source_status.collect(
+                    self.ti_engine, self.abuseipdb, self.virustotal, ti_match=bool(ti_match),
+                    dest_ip=dest_ip if _dest_ip_is_real_host else None,
+                    domain=top_domain if top_domain and top_domain != "unknown" else None)
 
                 # ─── PHASE 5: ML scoring + risk computation (re-acquire lock) ──────────
                 # --- Version 7 Integration ---
@@ -3837,6 +3866,7 @@ class EnginePipeline:
                                             float(features.get("ti_risk", 0.0) or 0.0),
                                             float(features.get("abuseipdb_risk", 0.0) or 0.0),
                                             target_asn_owner, _asn_safe, list(grouped_evidence.keys()),
+                                            reputation_sources=features.get("reputation_sources"),
                                         )
                                     except Exception as exc:  # the alert must never fail over its context block
                                         LOGGER.debug("benign-explanations block skipped: %s", exc)
